@@ -22,7 +22,7 @@
   let retry;
   let revision, me, order, rosterAt = 0, online = [], leaders, target, directive, presence, owner, notice;
   const candidates = new Map();
-  const commands = ['EVERYONE TURTLE','EVERYONE PILE ON','DRAG CHAIN OUT','AIMING FOR 1k CHAIN','INSIDE HITS ONLY','Clear order','BUILD CHAIN','CHAIN DENIAL, HOSP ONLINERS'];
+  const commands = ['EVERYONE TURTLE','EVERYONE ATTACK','DRAG CHAIN OUT','AIM->1k CHAIN','INSIDE HITS ONLY','Clear order','BUILD CHAIN','CHAIN DENIAL - HOSP ONLINERS'];
   let ops={}, nextIntel=0, chainObservation=null, opsBox, assignments, recipient, memberCommand, watchList, extras, attackAlert, shareButton;
   let previousFights=null, fightUntil=0, selectedFight=null, previousSignal=null;
 
@@ -212,11 +212,11 @@
       if (rosterAt && Date.now()-rosterAt > 45000) await postNative(base+'/roster','Bearer '+sessionToken,{}, {'X-Torn-Key':key});
       for (const row of batch) if (pending.get(row.id) === row) pending.delete(row.id);
       void refreshIntel();
-      status = 'Connected · PDA';
+      status = 'Connected';
       panel?.querySelector('form')?.remove();
     } catch (err) {
       const message = String(err?.message || '');
-      status = (/^(Login HTTP \d+|Sync HTTP \d+|Request timed out)$/.test(message) ? message : 'PDA request failed') + ' · retrying';
+      status = (/^(Login HTTP \d+|Sync HTTP \d+|Request timed out)$/.test(message) ? message : 'request failed') + ' · retrying';
       delay = 10000;
     } finally { syncing = false; }
     render();
