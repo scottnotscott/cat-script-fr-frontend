@@ -42,7 +42,8 @@
       data.attacks=[...entries.values()].sort((a,b)=>b.at-a.at);
     }
     const recent=data.attacks || [];
-    const signatures=new Map(recent.map(a=>[a.id,JSON.stringify([a.result,a.live,a.attackerLife,a.defenderLife])]));
+    const signatures=new Map(recent.map(a=>[a.id,JSON.stringify([a.result,a.live,a.attackerLife,a.defenderLife,a.attackerMax,a.defenderMax,a.respect])]));
+    if(selectedFight?.live){const latest=recent.find(a=>a.id===selectedFight.id);if(latest){selectedFight=latest;if(Date.now()-(latest.sampleAt||latest.at)<15000)fightUntil=Date.now()+7500;}else fightUntil=0;}
     if(!previousFights){selectedFight=recent.find(a=>a.live && Date.now()-(a.sampleAt||a.at)<15000);if(selectedFight)fightUntil=Date.now()+7500;}
     if(previousFights){
       const changed=recent.filter(a=>signatures.get(a.id)!==previousFights.get(a.id) && Date.now()-(a.sampleAt || a.at)<45000);
@@ -143,7 +144,7 @@
       const grid=element('ul','people');
       for (const name of [...online].sort((a,b)=>a.localeCompare(b))) {
         const cell=element('li','','');
-        if(me?.leader && (ops.available||[]).includes(name)){const b=element('button','member',name+' · '+((ops.views||[]).find(v=>v.name===name)?.page||'Other'));b.onclick=()=>{recipient.value=name;assignments.open=true;assignments.scrollIntoView({block:'nearest'});};cell.append(b);}
+        if(me?.leader && (ops.available||[]).includes(name)){const b=element('button','member',name+' · '+((ops.views||[]).find(v=>v.name===name)?.page||'Other')+((ops.views||[]).find(v=>v.name===name)?.visible===false?' · background':''));b.onclick=()=>{recipient.value=name;assignments.open=true;assignments.scrollIntoView({block:'nearest'});};cell.append(b);}
         else cell.textContent=name;
         grid.append(cell);
       }
@@ -472,20 +473,21 @@
     if(!extras || !opsBox)return;
     const personal=ops.personal?.cleared && Date.now()-ops.personal.at>=10000 ? null : ops.personal;
     const lines=[...(ops.instructions || [])];
-    if(personal)lines.unshift('@'+personal.by+(personal.cleared?' cleared your order':' has issued you an order: '+personal.text));
-    const signal=JSON.stringify([lines,personal?.at]);
+    if(personal?.cleared)lines.unshift('@'+personal.by+' cleared your order');
+    const signal=JSON.stringify([lines,personal?.at,personal?.text]);
     if(signal!==previousSignal){
       const first=previousSignal===null;
       previousSignal=signal;
       extras.replaceChildren(...lines.map(line=>element('div','signal',line)));
-      if(lines.length && (!first || (personal && Date.now()-personal.at<30000))){
-        dismissFlash();flash.replaceChildren(element('small','','WAR DIRECTION'),element('b','command',lines.join(' · ')));showFlash();
+      if((lines.length || (personal && !personal.cleared)) && (!first || (personal && Date.now()-personal.at<30000))){
+        dismissFlash();flash.replaceChildren(element('small','','WAR DIRECTION'),element('b','command',lines.length?lines.join(' · '):personal.text));showFlash();
       }
     }
     const secs=Math.max(0,Math.ceil(((ops.chain?.endsAt||0)-Date.now())/1000));const timer=ops.chain?.endsAt?Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0'):'--:--';
     const watchers='🔗 '+(ops.chain?.count||0)+' · '+timer+' · '+(ops.watcherEnergy||[]).map(m=>m.name+' ⚡'+(m.energy??'?')).join(' / ')+(ops.claim?' · '+ops.claim.name+' has next hit':'');
     let watcher=extras.querySelector('.watchers');if(!watcher){watcher=element('div','watchers');extras.append(watcher);}watcher.hidden=!(ops.watchers||[]).length;watcher.replaceChildren(document.createTextNode(watchers));if((ops.watchers||[]).includes(me?.name)&&secs>0&&(!ops.claim||ops.claim.name===me.name)){const b=element('button','claim',ops.claim?'Release hit':'I have next hit');b.onclick=()=>sendAction('claim',ops.claim?'Release next hit':'Claim next hit');watcher.append(b);}
     placePersonal(personal);
+    if(personal && !personal.cleared && personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=personal.text;}else extras.querySelector('.personalFallback')?.remove();
     positionFight();
     assignments.hidden=!me?.leader;if(!me?.leader)opsBox.hidden=true;
     watchSection.hidden=!me?.leader || !ops.warActive;
@@ -500,6 +502,7 @@
     const ready=fresh.filter(m=>m.online && /^(ok|okay)$/i.test(m.status));
     const sum=list=>list.reduce((n,m)=>n+m.energy,0);
     const label='👥 '+online.length+' · ⚡ '+sum(fresh.filter(m=>m.online))+'E online · '+sum(ready)+'E ready';
+    rosterTabs.parentElement.firstChild.textContent=label;
     opsBox.firstChild.textContent=label;
     const sig=JSON.stringify([members,ready.length,Math.floor(now/5000)]);
     if(sig===opsKey)return;opsKey=sig;
