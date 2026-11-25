@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.5
+// @version      0.9.6
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
@@ -15,7 +15,8 @@
   let socket, authenticated = false, status = 'Torn key needed', feed = [], panel, output, title;
   const pending = new Map();
   const sentObservations = new Map();
-  const RELAY_URL = 'ws://167.114.182.109:8787/relay';
+  const RELAY_BASE = 'https://167.114.182.109:8787'; // Requires a trusted TLS certificate for the IP (or use your TLS hostname).
+  const RELAY_URL = RELAY_BASE.replace(/^http/,'ws')+'/relay';
   const TORN_API_KEY = '###PDA-APIKEY###';
   const validKey = value => /^[a-zA-Z0-9]{16}$/.test(value);
   let key = validKey(TORN_API_KEY) ? TORN_API_KEY : '';
@@ -26,7 +27,7 @@
   let ops={}, nextIntel=0, chainObservation=null, opsBox, assignments, recipient, memberCommand, watchList, extras, attackAlert, shareButton;
   let previousFights=null, fightUntil=0, selectedFight=null, previousSignal=null;
 
-  const endpoint = path => RELAY_URL.replace(/^ws/,'http').replace('/relay',path);
+  const endpoint = path => RELAY_BASE+path;
   async function refreshIntel(){
     if(Date.now()<nextIntel || (!sessionToken && !authenticated))return;
     nextIntel=Date.now()+30000;
@@ -195,7 +196,7 @@
     let delay = 3000;
     try {
       if (!sessionToken) {
-        status = 'Signing in to PC'; render();
+        status = 'Signing in to VPS'; render();
         const login = await post('/login', 'ApiKey ' + key, {});
         if (Number(login.status) === 403) { status = 'Check Torn key and faction'; render(); return; }
         if (Number(login.status) !== 200) throw Error('Login HTTP ' + (login.status || 0));
@@ -223,7 +224,7 @@
     retry = setTimeout(syncNative, delay);
   }
   function fallback() {
-    if (typeof PDA_httpPost === 'function') return syncNative();
+    if (nativeAvailable()) return syncNative();
     status = 'WebSocket unavailable';
     render();
     retry = setTimeout(connect,10000);
@@ -240,6 +241,7 @@
     socket.onmessage = e => {
       let data;
       try { data = JSON.parse(e.data); } catch { return; }
+      if(data.type==='orderResult'){const cb=orderWaiters.get(data.requestId);if(cb){orderWaiters.delete(data.requestId);cb(data);}return;}
       if (data.type === 'orderDenied') {notice.textContent='Order refused. Check your faction role.';return;}
       if (data.type !== 'snapshot' || !(Array.isArray(data.attacks)||Array.isArray(data.attackChanges))) return;
       authenticated = true;
@@ -412,16 +414,29 @@
     attackAlert.style.position='static';attackAlert.style.removeProperty('top');
     
   }
+  const orderWaiters=new Map();
   async function sendAction(scope,command,target,ids) {
     const payload={type:'order',scope,command,target,ids};
+    notice.textContent=' Sending…';
     try {
-      if(authenticated)socket.send(JSON.stringify(payload));
-      else {
-        const r=await postNative(endpoint('/order'),'Bearer '+sessionToken,payload);
-        if(Number(r.status)!==200)throw Error();
+      if(authenticated && socket?.readyState===1){
+        const requestId=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+        const result=await new Promise((resolve,reject)=>{
+          const timer=setTimeout(()=>{orderWaiters.delete(requestId);reject(Error('No order acknowledgement'));},12000);
+          orderWaiters.set(requestId,data=>{clearTimeout(timer);resolve(data);});
+          try{socket.send(JSON.stringify({...payload,key,requestId}));}catch(err){clearTimeout(timer);orderWaiters.delete(requestId);reject(err);}
+        });
+        if(!result.ok)throw Error(result.error||'Order rejected');
+      }else{
+        if(!sessionToken)throw Error('Not signed in to VPS');
+        const r=await postNative(endpoint('/order'),'Bearer '+sessionToken,payload,{'X-Torn-Key':key});
+        if(Number(r.status)===401){sessionToken=null;clearTimeout(retry);void syncNative();throw Error('Session expired; reconnecting, retry order');}
+        if(Number(r.status)!==200){let reason;try{reason=JSON.parse(r.responseText).error;}catch{}throw Error(reason||'Order HTTP '+(r.status||0));}
+        clearTimeout(retry);if(!syncing)void syncNative();
       }
-      notice.textContent=' Sent';
-    } catch {notice.textContent=' Order refused or relay offline';}
+      notice.textContent=' Confirmed';
+      return true;
+    }catch(err){notice.textContent=' '+(err?.message||'Order failed');return false;}
   }
   function options(select,list) {
     const sig=JSON.stringify(list);
@@ -619,19 +634,7 @@
     const send = document.createElement('button');
     send.textContent = 'Send order';
     notice = document.createElement('span');
-    send.onclick = async () => {
-      const request = {type:'order',command:directive.value,target:target.value};
-      send.disabled=true;
-      try {
-        if (authenticated) socket.send(JSON.stringify(request));
-        else {
-          const res = await postNative(RELAY_URL.replace(/^ws/,'http').replace('/relay','/order'),'Bearer '+sessionToken,request);
-          if (Number(res.status)!==200) throw Error();
-        }
-        notice.textContent=' Sent';
-      } catch {notice.textContent=' Order refused or relay offline';}
-      finally {send.disabled=false;}
-    };
+    send.onclick=async()=>{send.disabled=true;try{await sendAction('global',directive.value,target.value);}finally{send.disabled=false;}};
     leaders.append(element('h4','','Global orders'),directive,target,send,notice);
     const news = document.createElement('button');
     news.className='news';
