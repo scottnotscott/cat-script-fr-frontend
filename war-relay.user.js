@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.8.0
+// @version      0.9.0
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
@@ -154,9 +154,9 @@
       lastFeed=feedKey;
       const items=feed.map(r=>{
         const item=element('article','fight');
-        item.append(element('b',r.live?'live':'result',r.live?'LIVE FIGHT':r.result || (r.finished?'Outcome unavailable':'Observed')),clock(r.sampleAt || r.at));
+        item.append(element('b',r.live?'live':'result',r.live?'LIVE FIGHT':outcome(r)+(Number.isFinite(r.respect)?' · +'+r.respect.toFixed(2)+' R':'')),clock(r.sampleAt || r.at));
         const fighter=(name,life)=> (name && name!=='0'?name:'Unknown') + (r.live?' (last HP '+(life??'?')+')':'');
-        item.append(element('div','fighters',fighter(r.attacker,r.attackerLife)+' → '+fighter(r.defender,r.defenderLife)));
+        if(r.live){const bars=element('div','fighters hpgrid');bars.append(hpBar(r.attacker,r.attackerLife,r.attackerMax),hpBar(r.defender,r.defenderLife,r.defenderMax));item.append(bars);}else item.append(element('div','fighters',fighter(r.attacker,r.attackerLife)+' → '+fighter(r.defender,r.defenderLife)));
         return item;
       });
       output.replaceChildren(element('h4','','Chain activity'),...(items.length?items:[element('p','','Waiting for chain observations')]));
@@ -174,7 +174,8 @@
     if(p==='/loader.php' && new URLSearchParams(location.search).get('sid')==='attack')return 'Attack';
     return ({'/hospital.php':'Hospital','/travelagency.php':'Travel','/item.php':'Items','/gym.php':'Gym','/crimes.php':'Crimes','/profiles.php':'Profile'})[p]||'Other';
   }
-  function reportPresence(){if(authenticated && socket?.readyState===1)socket.send(JSON.stringify({type:'presence',page:currentPage()}));}
+  function pageInfo(){const targetId=new URLSearchParams(location.search).get('user2ID');const heading=document.querySelector('#mainContainer h1, .content-title h4, main h1');const title=(heading?.textContent?.trim()||document.title.replace(/\s*[-|–]\s*Torn.*$/i,'')||currentPage()).slice(0,70);const targetName=feed.find(a=>a.pair?.split('-')[1]===targetId)?.defender||document.querySelector('a[href*="XID='+targetId+'"]')?.textContent?.trim()||targetId;return {page:currentPage()==='Attack'&&targetId?'→ '+targetName:title,focused:document.hasFocus(),visible:!document.hidden,targetId};}
+  function reportPresence(){if(authenticated && socket?.readyState===1)socket.send(JSON.stringify({type:'presence',...pageInfo()}));}
   setInterval(reportPresence,5000);
   window.addEventListener('hashchange',reportPresence);
 
@@ -217,7 +218,7 @@
       }
       const batch = [...pending.values()];
       if (!feed.length && status !== 'Connected · PDA') { status = 'Syncing with PC'; render(); }
-      const res = await post('/sync', 'Bearer ' + sessionToken, {attacks:batch,revision,delta:true,chain:chainObservation,page:currentPage()});
+      const res = await post('/sync', 'Bearer ' + sessionToken, {attacks:batch,revision,delta:true,chain:chainObservation,...pageInfo()});
       if (Number(res.status) === 401) sessionToken = null;
       if (Number(res.status) !== 200) throw Error('Sync HTTP ' + (res.status || 0));
       const data = JSON.parse(res.responseText);
@@ -277,7 +278,7 @@
     const own=String(data?.factionID ?? data?.warDesc?.factionID ?? '')==='55412';
     const source=data?.wars?.find?.(w=>w.key==='chain'||w.type==='chain')?.data ?? data?.warDesc ?? data;
     const count=source?.chainBar?.chain ?? source?.chain?.chain;
-    if(own && count!=null && Number.isSafeInteger(Number(count)))chainObservation={count:Number(count),at:sampleAt};
+    if(own && count!=null && Number.isSafeInteger(Number(count)))chainObservation={count:Number(count),at:sampleAt,timeout:source?.chainBar?.timeout ?? source?.chain?.timeout};
     const members = data?.rankedWarMembers || data?.warDesc?.members;
     if (members && typeof members === 'object') {
       const fresh = new Map();
@@ -304,7 +305,9 @@
           const n = raw?.current ?? raw;
           return (typeof n === 'number' || typeof n === 'string' && /^\d+$/.test(n)) && Number.isSafeInteger(Number(n)) && Number(n)>=0 ? Number(n) : null;
         };
-        const report={id,sampleAt,result:typeof r.result === 'string' ? r.result : '',attackerLife:live ? life(aid) : null,defenderLife:live ? life(did) : null,pair,live,finished:!live,at:time > 1e12 ? time : time*1000,attacker:label(aid,r.attackerName ?? r.attacker),defender:label(did,r.defenderName ?? r.defender)};
+        const maxLife=id=>{const n=Number(users[id]?.life?.maximum ?? users[id]?.life?.max);return Number.isSafeInteger(n)&&n>0?n:null;};
+        const rawRespect=r.respect ?? r.respect_gain ?? r.respectGain;
+        const report={id,sampleAt,attackerMax:maxLife(aid),defenderMax:maxLife(did),respect:rawRespect!=null && Number.isFinite(Number(rawRespect))?Number(rawRespect):null,result:typeof r.result === 'string' ? r.result : '',attackerLife:live ? life(aid) : null,defenderLife:live ? life(did) : null,pair,live,finished:!live,at:time > 1e12 ? time : time*1000,attacker:label(aid,r.attackerName ?? r.attacker),defender:label(did,r.defenderName ?? r.defender)};
         const signature=JSON.stringify({...report,sampleAt:0});
         const prior=sentObservations.get(id);
         if(prior?.signature===signature && (!live || sampleAt-prior.at<15000))continue;
@@ -411,13 +414,15 @@
       if(!timer) timer=setTimeout(()=>{timer=null;locate();},700);
     }).observe(document.body,{childList:true,subtree:true});
   }
+  function outcome(a){return /^attacked$/i.test(a.result||'')?'Left':a.result||'Outcome unavailable';}
+  function hpBar(name,hp,max){const wrap=element('div','hpwrap');wrap.append(element('div','hplabel',name+' · '+(hp??'?')+(max?' / '+max:'')));if(Number.isFinite(hp)&&Number.isFinite(max)&&max>0){const bar=element('div','hpbar'),fill=element('div','hpfill');fill.style.width=Math.max(0,Math.min(100,100*hp/max))+'%';bar.append(fill);wrap.append(bar);}return wrap;}
   function positionFight() {
     if(!attackAlert)return;
     attackAlert.hidden=!selectedFight || Date.now()>=fightUntil;
     if(attackAlert.hidden)return;
     const a=selectedFight;
     const fighter=(name,hp)=> (name && name!=='0'?name:'Unknown')+(a.live?' · HP '+(hp??'?'):'');
-    attackAlert.textContent=(a.live?'LIVE':a.result || 'Attack ended')+'   '+fighter(a.attacker,a.attackerLife)+' → '+fighter(a.defender,a.defenderLife)+' · '+elapsed(a.sampleAt || a.at)+' ago';
+    if(a.live){const bars=element('div','hpgrid');bars.append(hpBar(a.attacker,a.attackerLife,a.attackerMax),hpBar(a.defender,a.defenderLife,a.defenderMax));attackAlert.replaceChildren(element('small','','LIVE · '+elapsed(a.sampleAt||a.at)+' ago'),bars);}else attackAlert.textContent=outcome(a)+' · '+fighter(a.attacker)+' → '+fighter(a.defender);
     const bar=visibleIconRow()?.getBoundingClientRect();
     attackAlert.style.position=bar?'fixed':'relative';
     attackAlert.style.top=bar?Math.ceil(Math.max(bar.bottom,flash.hidden?0:flash.getBoundingClientRect().bottom))+'px':'';
@@ -458,9 +463,11 @@
     const disable=element('button','','Stop enemy watch');disable.onclick=()=>sendAction('watch','Stop watching enemies');
     watchSection=element('details','assignments');watchSection.append(element('summary','','Enemy watch'),watchList,enable,disable);
     assignments.append(recipient,memberCommand,issue);panel.insertBefore(watchSection,output);
-    panel.insertBefore(opsBox,output);panel.insertBefore(assignments,output);
+    rosterTabs.append(opsBox);opsBox.hidden=true;panel.insertBefore(assignments,output);
   }
-  let opsKey='', watchSection, guard;
+  let opsKey='', watchSection, guard, personalHeader, rosterTabs;
+  function placePersonal(personal){if(!personalHeader)return;personalHeader.hidden=!personal||personal.cleared;if(personalHeader.hidden)return;personalHeader.textContent=personal.text;const logo=document.querySelector('a[href="/"],a[href="/index.php"],#logo,.logo');const search=document.querySelector('[aria-label*="search" i],[title="Search"],button[class*="search"]');const menu=document.querySelector('[aria-label*="menu" i],button[class*="burger"]');const a=logo?.getBoundingClientRect(),b=search?.getBoundingClientRect(),c=menu?.getBoundingClientRect();const left=Math.max(a?.right||0,c?.right||0)+4;if(a&&b&&b.left-left>40&&Math.abs(a.top-b.top)<40){personalHeader.style.cssText='position:fixed;left:'+left+'px;top:'+Math.max(0,a.top)+'px;width:'+(b.left-left-4)+'px;height:'+Math.max(20,a.height)+'px;font-size:'+Math.max(9,Math.min(14,(b.left-left-4)/(personal.text.length*.58)))+'px';}else personalHeader.hidden=true;}
+
   function renderOps() {
     if(!extras || !opsBox)return;
     const personal=ops.personal?.cleared && Date.now()-ops.personal.at>=10000 ? null : ops.personal;
@@ -475,10 +482,12 @@
         dismissFlash();flash.replaceChildren(element('small','','WAR DIRECTION'),element('b','command',lines.join(' · ')));showFlash();
       }
     }
-    const watchers='Chain watchers: '+((ops.watchers || []).join(', ') || 'unassigned');
-    let watcher=extras.querySelector('.watchers');if(!watcher){watcher=element('div','watchers');extras.append(watcher);}watcher.textContent=watchers;
+    const secs=Math.max(0,Math.ceil(((ops.chain?.endsAt||0)-Date.now())/1000));const timer=ops.chain?.endsAt?Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0'):'--:--';
+    const watchers='🔗 '+(ops.chain?.count||0)+' · '+timer+' · '+(ops.watcherEnergy||[]).map(m=>m.name+' ⚡'+(m.energy??'?')).join(' / ')+(ops.claim?' · '+ops.claim.name+' has next hit':'');
+    let watcher=extras.querySelector('.watchers');if(!watcher){watcher=element('div','watchers');extras.append(watcher);}watcher.hidden=!(ops.watchers||[]).length;watcher.replaceChildren(document.createTextNode(watchers));if((ops.watchers||[]).includes(me?.name)&&secs>0&&(!ops.claim||ops.claim.name===me.name)){const b=element('button','claim',ops.claim?'Release hit':'I have next hit');b.onclick=()=>sendAction('claim',ops.claim?'Release next hit':'Claim next hit');watcher.append(b);}
+    placePersonal(personal);
     positionFight();
-    opsBox.hidden=assignments.hidden=!me?.leader;
+    assignments.hidden=!me?.leader;if(!me?.leader)opsBox.hidden=true;
     watchSection.hidden=!me?.leader || !ops.warActive;
     if(guard){const id=new URLSearchParams(location.search).get('user2ID');const inside=order?.text==='INSIDE HITS ONLY'||(ops.instructions||[]).some(x=>x.startsWith('INSIDE HITS ONLY'));guard.hidden=!(currentPage()==='Attack' && inside && ops.warActive && ops.enemyRosterFresh && id && !(ops.enemyIds||[]).includes(id));}
     if(!me?.leader || !panel.open)return;
@@ -488,17 +497,17 @@
     if(before!==watchList.dataset.options)for(const o of watchList.options)o.selected=(ops.watchIds || []).includes(o.value);
     const members=ops.resources || [], now=Date.now();
     const fresh=members.filter(m=>Number.isFinite(m.energy)&&now-m.at<=90000);
-    const ready=fresh.filter(m=>m.online && m.status==='Okay');
+    const ready=fresh.filter(m=>m.online && /^(ok|okay)$/i.test(m.status));
     const sum=list=>list.reduce((n,m)=>n+m.energy,0);
-    const label='Energy · '+sum(ready)+'E online & Okay · '+fresh.length+'/'+members.length+' fresh';
+    const label='👥 '+online.length+' · ⚡ '+sum(fresh.filter(m=>m.online))+'E online · '+sum(ready)+'E ready';
     opsBox.firstChild.textContent=label;
     const sig=JSON.stringify([members,ready.length,Math.floor(now/5000)]);
     if(sig===opsKey)return;opsKey=sig;
     const readings=opsBox.lastChild;
     const delta=t=>elapsed(now-Math.max(0,t-now));
     readings.replaceChildren(element('p','','Reported total: '+sum(fresh)+'E · readings older than 1:30 excluded'));
-    for(const m of members.filter(m=>m.at).sort((a,b)=>b.energy-a.energy)){
-      readings.append(element('div','reading',m.name+' · '+m.energy+'E · '+m.status+
+    for(const m of members.filter(m=>m.at && m.online).sort((a,b)=>b.energy-a.energy)){
+      readings.append(element('div','reading',m.name+' · ⚡'+m.energy+' · ❤️'+(m.life??'?')+(m.maxLife?'/'+m.maxLife:'')+' · '+m.status+
         ' · booster '+(m.boosterUntil==null?'unknown':m.boosterUntil<=now?'ready':delta(m.boosterUntil))+
         (m.landAt?' · '+m.destination+' ETA '+new Date(m.landAt).toLocaleTimeString():m.destination?' · '+m.destination:'')+
         ' · seen '+elapsed(m.at)+' ago'));
@@ -541,7 +550,7 @@
     style.textContent+=`
       .signal{padding:8px 12px;background:#63471b;color:#fff3cd;font-weight:750}.watchers,.reading{padding:5px 10px;background:#253038;color:#ecf2f5}
       .fightAlert{z-index:2147483645;left:0;right:0;width:100%;background:#263944eb;color:white;padding:6px 10px;border:0;border-radius:0;text-align:left;font-size:12px}
-      .member{background:transparent;border:0;color:inherit;padding:2px}.headcount,.assignments,.share{margin:7px}.assignments select,.assignments button{margin:3px;max-width:96%}
+      .hpgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.hpbar{height:5px;background:#a74040;border-radius:3px;overflow:hidden}.hpfill{height:100%;background:#77c75a}.hplabel{font-size:11px;overflow-wrap:anywhere}.claim{pointer-events:auto;margin-left:5px;font-size:11px;padding:3px}.watchers{font-size:11px}.personalHeader{z-index:2147483647;color:#ffe194;background:#252525;display:flex;align-items:center;justify-content:center;text-align:center;line-height:1;overflow:hidden;pointer-events:none}.tabrow{display:flex;gap:4px;padding:4px}.tabrow button{flex:1;font-size:12px;padding:4px}.people{grid-template-columns:1fr!important}.people li{padding:2px 5px!important}.member{background:transparent;border:0;color:inherit;padding:2px}.headcount,.assignments,.share{margin:7px}.assignments select,.assignments button{margin:3px;max-width:96%}
     `;
     panel = document.createElement('details');
     title = document.createElement('summary');
@@ -580,7 +589,7 @@
     news.className='news';
     fillTargets();
     panel.ontoggle = () => {if(panel.open) fillTargets(); render();};
-    const onlineTab=element('details','');onlineTab.append(element('summary','','Online now'),presence);
+    const onlineTab=element('details','');onlineTab.append(element('summary','','👥 Members & energy'));rosterTabs=element('div','rosterTabs');const tabs=element('div','tabrow');const peopleButton=element('button','','👥 Online');const energyButton=element('button','','⚡ Energy');peopleButton.onclick=()=>{presence.hidden=false;opsBox.hidden=true;};energyButton.onclick=()=>{if(me?.leader){presence.hidden=true;opsBox.hidden=false;opsBox.open=true;}};tabs.append(peopleButton,energyButton);rosterTabs.append(tabs,presence);onlineTab.append(rosterTabs);
     const globalTab=element('details','');globalTab.append(element('summary','','Global orders'),leaders);
     panel.append(title,onlineTab,globalTab,output,news);
     if (!key) {
@@ -609,7 +618,7 @@
     extras=element('div','signals');
     buildOps();
     guard=element('aside','banner','CHAIN BONUS WARNING · Outside target. Return to the faction war and select an enemy.');guard.hidden=true;guard.setAttribute('role','alert');
-    root.append(style,flash,attackAlert,guard,owner,extras,panel);
+    personalHeader=element('div','personalHeader');personalHeader.hidden=true;root.append(style,flash,attackAlert,guard,owner,extras,panel,personalHeader);
     if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.hidden=true;host.style.cssText='position:fixed;top:0;left:0;right:0;z-index:2147483644;pointer-events:none';document.body.append(host);}
     setInterval(()=>{if(document.hidden)return;positionFight();renderOps();for(const time of root.querySelectorAll('time[data-stamp]')) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
