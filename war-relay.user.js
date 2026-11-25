@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.6.0
+// @version      0.6.1
 // @match        https://www.torn.com/factions.php*
 // @run-at       document-start
 // @grant        none
@@ -45,6 +45,49 @@
     return t;
   }
   let lastOrder='', lastRoster='', lastFeed='', flash, flashTimer;
+  function visibleIconRow() {
+    const selectors = '#sidebarroot [class*="status-icons"],#sidebarroot [class*="statusIcons"],#status-icons,.status-icons,[class*="iconTray"],[class*="icon-tray"],[class*="statusIcons"],[class*="status-icons"],[class*="user-information-icons"]';
+    for (const node of document.querySelectorAll(selectors)) {
+      const r=node.getBoundingClientRect();
+      if (r.width>80 && r.height>8 && r.height<100 && r.bottom>0 && r.top<innerHeight/2 && r.right>0 && r.left<innerWidth) return node;
+    }
+    // On mobile layouts the row may only expose individual icon tooltips.
+    for (const icon of document.querySelectorAll('[title*="Points" i],[aria-label*="points" i],[data-tooltip*="points" i],#user_points')) {
+      for (let n=icon; n && n!==document.body; n=n.parentElement) {
+        const r=n.getBoundingClientRect();
+        if (r.height>90) break;
+        if (r.width>innerWidth*.55 && r.height>=12 && r.bottom>0 && r.top<innerHeight/2 && n.querySelectorAll('img,svg,i,a,li').length>=3) return n;
+      }
+    }
+    return null;
+  }
+  let stopTracking=()=>{};
+  function dismissFlash() {
+    clearTimeout(flashTimer);
+    stopTracking();
+    if (flash) flash.hidden=true;
+  }
+  function showFlash() {
+    flash.hidden=false;
+    let row, frame, searchAfter=0;
+    function place() {
+      frame=0;
+      if (!row?.isConnected || !row.getClientRects().length) {
+        if(performance.now()>=searchAfter){row=visibleIconRow();searchAfter=performance.now()+400;}
+      }
+      const r=row?.getBoundingClientRect();
+      const safe=r && r.height>0 && r.bottom>0 && r.bottom<innerHeight-65 && r.right>0 && r.left<innerWidth;
+      flash.classList.toggle('anchored',Boolean(safe));
+      if(safe) flash.style.top=Math.ceil(r.bottom)+'px';
+    }
+    function schedule(){if(!frame)frame=requestAnimationFrame(place);}
+    place();
+    const timer=setInterval(schedule,400);
+    window.addEventListener('scroll',schedule,true);
+    window.addEventListener('resize',schedule);
+    stopTracking=()=>{clearInterval(timer);cancelAnimationFrame(frame);window.removeEventListener('scroll',schedule,true);window.removeEventListener('resize',schedule);stopTracking=()=>{};};
+    flashTimer=setTimeout(dismissFlash,10000);
+  }
   function render() {
     if (!title) return;
     title.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status);
@@ -53,8 +96,7 @@
     if (signature!==lastOrder) {
       lastOrder=signature;
       owner.hidden=!order;
-      clearTimeout(flashTimer);
-      flash.hidden=true;
+      dismissFlash();
       if (order) {
         const command=element('b','command',order.text);
         const who=element('div','issued','Issued by '+order.by+' · ');
@@ -62,8 +104,7 @@
         owner.replaceChildren(element('small','','ACTIVE WAR ORDER'),command,who);
         if (Date.now()-order.at<30000) {
           flash.replaceChildren(element('small','','NEW WAR ORDER'),command.cloneNode(true),element('span','',order.by));
-          flash.hidden=false;
-          flashTimer=setTimeout(()=>{flash.hidden=true;},10000);
+          showFlash();
         }
       } else owner.replaceChildren();
     }
@@ -257,15 +298,17 @@
     const css=element('style','');
     css.textContent='.'+hideClass+'{display:none!important}';
     document.head.append(css);
-    let hidden=false,section,anchor,timer;
+    let hidden=false,section,anchor,chainAnchor,timer;
     try {hidden=localStorage.getItem('fw.hideNews')==='1';} catch {}
     function locate() {
       const scope=document.querySelector('#faction-main,.content-wrapper,#mainContainer,main') || document.body;
       const walker=document.createTreeWalker(scope,NodeFilter.SHOW_TEXT);
       const news=[];
-      let announcement;
+      let announcement,chainLabel,warLabel;
       for(let node; (node=walker.nextNode());) {
         const text=node.nodeValue.trim().toLowerCase();
+        if(!chainLabel && /^(no active chain|active chain|current chain)$/.test(text)) chainLabel=node.parentElement;
+        if(!warLabel && /your faction is (?:not )?in a war|your faction is at war/.test(text)) warLabel=node.parentElement;
         if(text==='main news') news.push(node.parentElement);
         if(text==='faction announcement') announcement=node.parentElement;
       }
@@ -284,7 +327,20 @@
       }
       if(section && (section.contains(announcement || host) || section===scope || section===document.body)) section=null;
       // Insert at the section boundary, outside anything the toggle hides.
-      anchor=section || announcement?.closest('.sortable-box,section,[class*="announcement-wrap"]') || scope.querySelector('#faction_war_list_id,.f-war-list');
+      const widget = scope.querySelector('#chain-widget,#faction-chain,[data-widget="chain"],[class*="chain-box"],[class*="chainBox"],[class*="chain-widget"],[class*="chainWidget"]');
+      chainAnchor=chainLabel || widget;
+      if(chainAnchor) {
+        // Climb to the branch immediately after the war summary. Never move
+        // above their common ancestor or into the chain's title/controls.
+        const boundary = warLabel || announcement;
+        if(boundary && !chainAnchor.contains(boundary)) {
+          while(chainAnchor.parentElement && chainAnchor.parentElement!==scope && !chainAnchor.parentElement.contains(boundary))
+            chainAnchor=chainAnchor.parentElement;
+        } else {
+          chainAnchor=widget || chainAnchor.closest('section,.sortable-box,[class*="chain-wrap"],[class*="chainWrap"]') || chainAnchor.parentElement;
+        }
+      }
+      anchor=chainAnchor || section || announcement?.closest('.sortable-box,section,[class*="announcement-wrap"]') || scope.querySelector('#faction_war_list_id,.f-war-list');
       if(anchor && anchor!==host && !host.contains(anchor)) {
         if(host.nextElementSibling!==anchor) anchor.before(host);
       } else if(!host.isConnected) scope.prepend(host);
@@ -295,7 +351,7 @@
     button.onclick=()=>{hidden=!hidden;try{localStorage.setItem('fw.hideNews',hidden?'1':'0');}catch{}locate();};
     locate();
     new MutationObserver(()=>{
-      if(host.isConnected && section?.isConnected && anchor?.isConnected) return;
+      if(host.isConnected && section?.isConnected && chainAnchor?.isConnected && host.nextElementSibling===anchor) return;
       if(!timer) timer=setTimeout(()=>{timer=null;locate();},700);
     }).observe(document.body,{childList:true,subtree:true});
   }
@@ -321,7 +377,9 @@
       .banner small,.flash small{display:block;font-size:10px;letter-spacing:.12em;font-weight:800}
       .command{display:block;font-size:clamp(20px,5vw,30px);margin:4px 0;overflow-wrap:anywhere}
       .issued,.issued .age{font-size:12px;color:#423111}
-      .flash{position:fixed;z-index:2147483646;top:env(safe-area-inset-top,0);left:0;right:0;pointer-events:none;box-shadow:0 3px 15px #0007}
+      .flash{display:block;width:100%;background:rgba(255,212,106,.5);border:0;border-left:6px solid rgba(239,145,40,.5);border-radius:0;text-align:left;cursor:pointer;color:white;text-shadow:0 1px 2px #000,0 0 3px #000}
+      .flash.anchored{position:fixed;z-index:2147483646;left:0;right:0}
+      .flash:focus-visible{outline:2px solid white;outline-offset:-2px}
       h4{margin:0 0 6px;font-size:13px}.roster,.feed,.controls{margin:10px 12px}
       .people{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:4px}
       .people li{padding:4px 6px;background:#30393e;border-radius:3px;overflow-wrap:anywhere}
@@ -336,7 +394,7 @@
     panel.open=true;
     output=element('section','feed');
     owner=element('aside','banner'); owner.hidden=true; owner.setAttribute('aria-live','polite');
-    flash=element('aside','flash');flash.hidden=true;flash.setAttribute('role','alert');
+    flash=element('button','flash');flash.type='button';flash.hidden=true;flash.title='Dismiss new order alert';flash.setAttribute('aria-live','assertive');flash.onclick=dismissFlash;
     presence=element('section','roster');
     leaders=element('div','controls');
     leaders.hidden = true;
@@ -391,7 +449,7 @@
         connect();
       };
     }
-    root.append(style,owner,panel,flash);
+    root.append(style,flash,owner,panel);
     layout(host,news);
     setInterval(()=>{if(document.hidden)return;for(const time of root.querySelectorAll('time[data-stamp]')) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
