@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.4.0
+// @version      0.4.1
 // @match        https://www.torn.com/factions.php*
 // @run-at       document-start
 // @grant        none
@@ -30,26 +30,56 @@
     pending.clear();
   }
   let sessionToken;
+  let syncing = false;
+  function nativeAvailable() {
+    return typeof PDA_httpPost === 'function' || typeof window.flutter_inappwebview?.callHandler === 'function';
+  }
+  async function postNative(url, auth, data) {
+    const args = [url, {Authorization: auth, 'Content-Type':'application/json'}, JSON.stringify(data)];
+    let timer;
+    try {
+      const request = typeof PDA_httpPost === 'function' ? PDA_httpPost(...args)
+        : window.flutter_inappwebview.callHandler('PDA_httpPost', ...args);
+      const result = await Promise.race([request, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Error('Request timed out')), 15000);
+      })]);
+      return typeof result === 'string' ? JSON.parse(result) : result;
+    } finally { clearTimeout(timer); }
+  }
   async function syncNative() {
+    if (syncing) return;
+    if (!nativeAvailable()) {
+      status = 'Waiting for PDA HTTP bridge';
+      render();
+      retry = setTimeout(syncNative, 2000);
+      return;
+    }
+    syncing = true;
     const base = RELAY_URL.replace(/^ws/, 'http').replace(/\/relay$/, '');
-    const post = (path, auth, body) => PDA_httpPost(base + path, {'Authorization':auth, 'Content-Type':'application/json'}, JSON.stringify(body));
+    const post = (path, auth, body) => postNative(base + path, auth, body);
     let delay = 3000;
     try {
       if (!sessionToken) {
+        status = 'Signing in to PC'; render();
         const login = await post('/login', 'ApiKey ' + key, {});
         if (Number(login.status) === 403) { status = 'Check Torn key and faction'; render(); return; }
-        if (Number(login.status) !== 200) throw Error();
+        if (Number(login.status) !== 200) throw Error('Login HTTP ' + (login.status || 0));
         sessionToken = JSON.parse(login.responseText).token;
       }
       const batch = [...pending.values()];
+      if (!feed.length && status !== 'Connected · PDA') { status = 'Syncing with PC'; render(); }
       const res = await post('/sync', 'Bearer ' + sessionToken, batch);
       if (Number(res.status) === 401) sessionToken = null;
-      if (Number(res.status) !== 200) throw Error();
+      if (Number(res.status) !== 200) throw Error('Sync HTTP ' + (res.status || 0));
       feed = JSON.parse(res.responseText).attacks;
       for (const row of batch) if (pending.get(row.id) === row) pending.delete(row.id);
       status = 'Connected · PDA';
       panel?.querySelector('form')?.remove();
-    } catch { status = 'PC unreachable · retrying'; delay = 10000; }
+    } catch (err) {
+      const message = String(err?.message || '');
+      status = (/^(Login HTTP \d+|Sync HTTP \d+|Request timed out)$/.test(message) ? message : 'PDA request failed') + ' · retrying';
+      delay = 10000;
+    } finally { syncing = false; }
     render();
     retry = setTimeout(syncNative, delay);
   }
@@ -62,9 +92,11 @@
   function connect() {
     clearTimeout(retry);
     if (!key) return;
+    if (validKey(TORN_API_KEY) || nativeAvailable()) return syncNative();
     status = 'Connecting';
     render();
     try { socket = new WebSocket(RELAY_URL); } catch { return fallback(); }
+    socket.onerror = () => { status = 'WebSocket blocked or unreachable'; render(); };
     socket.onopen = () => socket.send(JSON.stringify({type:'auth', key}));
     socket.onmessage = e => {
       let data;
