@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.6
+// @version      0.9.7
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
@@ -15,7 +15,7 @@
   let socket, authenticated = false, status = 'Torn key needed', feed = [], panel, output, title;
   const pending = new Map();
   const sentObservations = new Map();
-  const RELAY_BASE = 'https://167.114.182.109:8787'; // Requires a trusted TLS certificate for the IP (or use your TLS hostname).
+  const RELAY_BASE = 'http://167.114.182.109:8787';
   const RELAY_URL = RELAY_BASE.replace(/^http/,'ws')+'/relay';
   const TORN_API_KEY = '###PDA-APIKEY###';
   const validKey = value => /^[a-zA-Z0-9]{16}$/.test(value);
