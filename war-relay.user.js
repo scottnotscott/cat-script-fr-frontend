@@ -203,7 +203,7 @@
         revision = null;
       }
       const batch = [...pending.values()];
-      if (!feed.length && status !== 'Connected · PDA') { status = 'Syncing with PC'; render(); }
+      if (!feed.length && status !== 'Connected · PDA') { status = '↺'; render(); }
       const res = await post('/sync', 'Bearer ' + sessionToken, {attacks:batch,revision,delta:true,chain:chainObservation,...pageInfo()});
       if (Number(res.status) === 401) sessionToken = null;
       if (Number(res.status) !== 200) throw Error('Sync HTTP ' + (res.status || 0));
