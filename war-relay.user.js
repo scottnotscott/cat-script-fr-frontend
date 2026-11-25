@@ -15,7 +15,7 @@
   let socket, authenticated = false, status = 'Torn key needed', feed = [], panel, output, title;
   const pending = new Map();
   const sentObservations = new Map();
-  const RELAY_URL = 'ws://167.114.182.109/relay';
+  const RELAY_URL = 'ws://167.114.182.109:8787/relay';
   const TORN_API_KEY = '###PDA-APIKEY###';
   const validKey = value => /^[a-zA-Z0-9]{16}$/.test(value);
   let key = validKey(TORN_API_KEY) ? TORN_API_KEY : '';
