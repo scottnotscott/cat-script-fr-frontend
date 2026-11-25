@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.3.0
+// @version      0.4.0
 // @match        https://www.torn.com/factions.php*
 // @run-at       document-start
 // @grant        none
@@ -14,7 +14,7 @@
   window.__fwRelay = true;
   let socket, authenticated = false, status = 'Torn key needed', feed = [], panel, output, title;
   const pending = new Map();
-  const RELAY_URL = 'wss://desktop-irkpup3.tail6d7050.ts.net:8443/relay';
+  const RELAY_URL = 'ws://100.103.255.117:8787/relay';
   const TORN_API_KEY = '###PDA-APIKEY###';
   const validKey = value => /^[a-zA-Z0-9]{16}$/.test(value);
   let key = validKey(TORN_API_KEY) ? TORN_API_KEY : '';
@@ -29,12 +29,42 @@
     socket.send(JSON.stringify({type:'observe', attacks:[...pending.values()]}));
     pending.clear();
   }
+  let sessionToken;
+  async function syncNative() {
+    const base = RELAY_URL.replace(/^ws/, 'http').replace(/\/relay$/, '');
+    const post = (path, auth, body) => PDA_httpPost(base + path, {'Authorization':auth, 'Content-Type':'application/json'}, JSON.stringify(body));
+    let delay = 3000;
+    try {
+      if (!sessionToken) {
+        const login = await post('/login', 'ApiKey ' + key, {});
+        if (Number(login.status) === 403) { status = 'Check Torn key and faction'; render(); return; }
+        if (Number(login.status) !== 200) throw Error();
+        sessionToken = JSON.parse(login.responseText).token;
+      }
+      const batch = [...pending.values()];
+      const res = await post('/sync', 'Bearer ' + sessionToken, batch);
+      if (Number(res.status) === 401) sessionToken = null;
+      if (Number(res.status) !== 200) throw Error();
+      feed = JSON.parse(res.responseText).attacks;
+      for (const row of batch) if (pending.get(row.id) === row) pending.delete(row.id);
+      status = 'Connected · PDA';
+      panel?.querySelector('form')?.remove();
+    } catch { status = 'PC unreachable · retrying'; delay = 10000; }
+    render();
+    retry = setTimeout(syncNative, delay);
+  }
+  function fallback() {
+    if (typeof PDA_httpPost === 'function') return syncNative();
+    status = 'WebSocket unavailable';
+    render();
+    retry = setTimeout(connect,10000);
+  }
   function connect() {
     clearTimeout(retry);
     if (!key) return;
     status = 'Connecting';
     render();
-    try { socket = new WebSocket(RELAY_URL); } catch { status = 'WebSocket blocked'; render(); return; }
+    try { socket = new WebSocket(RELAY_URL); } catch { return fallback(); }
     socket.onopen = () => socket.send(JSON.stringify({type:'auth', key}));
     socket.onmessage = e => {
       let data;
@@ -48,7 +78,9 @@
       flush();
     };
     socket.onclose = e => {
+      const hadSession = authenticated;
       authenticated = false;
+      if (!hadSession && e.code === 1006) return fallback();
       status = e.code === 1008 ? (e.reason || 'Access refused') : 'Disconnected';
       render();
       if (e.code !== 1008) retry = setTimeout(connect,10000);
