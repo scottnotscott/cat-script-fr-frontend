@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.7.0
-// @match        https://www.torn.com/factions.php*
+// @version      0.8.0
+// @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/scottnotscott/cat-script-fr-frontend/main/war-relay.user.js
@@ -23,15 +23,15 @@
   let revision, me, order, rosterAt = 0, online = [], leaders, target, directive, presence, owner, notice;
   const candidates = new Map();
   const commands = ['EVERYONE TURTLE','EVERYONE PILE ON','DRAG CHAIN OUT','AIMING FOR 1k CHAIN','INSIDE HITS ONLY','Clear order','BUILD CHAIN','CHAIN DENIAL, HOSP ONLINERS'];
-  let ops={}, share=false, nextIntel=0, chainObservation=null, opsBox, assignments, recipient, memberCommand, watchList, extras, attackAlert, shareButton;
+  let ops={}, nextIntel=0, chainObservation=null, opsBox, assignments, recipient, memberCommand, watchList, extras, attackAlert, shareButton;
   let previousFights=null, fightUntil=0, selectedFight=null, previousSignal=null;
-  try {share=localStorage.getItem('fw.shareReadiness')==='yes';} catch {}
+
   const endpoint = path => RELAY_URL.replace(/^ws/,'http').replace('/relay',path);
   async function refreshIntel(){
     if(Date.now()<nextIntel || (!sessionToken && !authenticated))return;
     nextIntel=Date.now()+30000;
-    if(authenticated){socket.send(JSON.stringify({type:'intel',key,share}));return;}
-    try { await postNative(endpoint('/intel'),'Bearer '+sessionToken,{}, {'X-Torn-Key':key,'X-Share':share?'yes':'no'}); } catch {}
+    if(authenticated){socket.send(JSON.stringify({type:'intel',key}));return;}
+    try { await postNative(endpoint('/intel'),'Bearer '+sessionToken,{}, {'X-Torn-Key':key}); } catch {}
   }
   function accept(data) {
     ops=data.ops || {};
@@ -137,13 +137,13 @@
     renderOps();
     if (!panel.open) return;
     leaders.hidden=!me?.leader;
-    const rosterKey=JSON.stringify([online,rosterAt,me?.leader]);
+    const rosterKey=JSON.stringify([online,rosterAt,me?.leader,ops.available,ops.views]);
     if (rosterKey!==lastRoster) {
       lastRoster=rosterKey;
       const grid=element('ul','people');
       for (const name of [...online].sort((a,b)=>a.localeCompare(b))) {
         const cell=element('li','','');
-        if(me?.leader){const b=element('button','member',name);b.onclick=()=>{recipient.value=name;assignments.open=true;assignments.scrollIntoView({block:'nearest'});};cell.append(b);}
+        if(me?.leader && (ops.available||[]).includes(name)){const b=element('button','member',name+' · '+((ops.views||[]).find(v=>v.name===name)?.page||'Other'));b.onclick=()=>{recipient.value=name;assignments.open=true;assignments.scrollIntoView({block:'nearest'});};cell.append(b);}
         else cell.textContent=name;
         grid.append(cell);
       }
@@ -168,6 +168,16 @@
     pending.clear();
   }
   let sessionToken;
+  function currentPage(){
+    const p=location.pathname, h=location.hash;
+    if(p==='/factions.php')return /war|chain/i.test(h)?'Faction war':'Faction';
+    if(p==='/loader.php' && new URLSearchParams(location.search).get('sid')==='attack')return 'Attack';
+    return ({'/hospital.php':'Hospital','/travelagency.php':'Travel','/item.php':'Items','/gym.php':'Gym','/crimes.php':'Crimes','/profiles.php':'Profile'})[p]||'Other';
+  }
+  function reportPresence(){if(authenticated && socket?.readyState===1)socket.send(JSON.stringify({type:'presence',page:currentPage()}));}
+  setInterval(reportPresence,5000);
+  window.addEventListener('hashchange',reportPresence);
+
   let syncing = false;
   function nativeAvailable() {
     return typeof PDA_httpPost === 'function' || typeof window.flutter_inappwebview?.callHandler === 'function';
@@ -207,7 +217,7 @@
       }
       const batch = [...pending.values()];
       if (!feed.length && status !== 'Connected · PDA') { status = 'Syncing with PC'; render(); }
-      const res = await post('/sync', 'Bearer ' + sessionToken, {attacks:batch,revision,delta:true,chain:chainObservation});
+      const res = await post('/sync', 'Bearer ' + sessionToken, {attacks:batch,revision,delta:true,chain:chainObservation,page:currentPage()});
       if (Number(res.status) === 401) sessionToken = null;
       if (Number(res.status) !== 200) throw Error('Sync HTTP ' + (res.status || 0));
       const data = JSON.parse(res.responseText);
@@ -432,8 +442,7 @@
     select.dataset.options=sig;
   }
   function buildOps() {
-    shareButton=element('button','share');
-    shareButton.onclick=()=>{share=!share;try{localStorage.setItem('fw.shareReadiness',share?'yes':'no');}catch{}nextIntel=0;void refreshIntel();renderOps();};
+
     opsBox=element('details','headcount');
     opsBox.append(element('summary','','Energy headcount'),element('div','readings'));
     assignments=element('details','assignments');
@@ -442,18 +451,19 @@
     memberCommand=element('select','');
     options(memberCommand,['SIT ABROAD (CLOSE)','SIT ABROAD (FAR)','TURTLE','OUTSIDE HITS ONLY','INSIDE HITS ONLY','BUILD CHAIN','Clear personal order','Assign watcher','Remove watcher'].map(s=>[s,s]));
     const issue=element('button','','Apply to member');
-    issue.onclick=()=>sendAction('member',memberCommand.value,recipient.value);
+    issue.onclick=()=>{if(recipient.value && (ops.available||[]).includes(recipient.value))sendAction('member',memberCommand.value,recipient.value);};
     watchList=element('select','');watchList.multiple=true;watchList.size=4;
     const enable=element('button','','Build chain · watch selected');
     enable.onclick=()=>sendAction('watch','Watch enemies','',[...watchList.selectedOptions].map(o=>o.value));
     const disable=element('button','','Stop enemy watch');disable.onclick=()=>sendAction('watch','Stop watching enemies');
-    assignments.append(recipient,memberCommand,issue,element('h4','','Watch for online opponents'),watchList,enable,disable);
-    panel.insertBefore(opsBox,output);panel.insertBefore(assignments,output);panel.append(shareButton);
+    watchSection=element('details','assignments');watchSection.append(element('summary','','Enemy watch'),watchList,enable,disable);
+    assignments.append(recipient,memberCommand,issue);panel.insertBefore(watchSection,output);
+    panel.insertBefore(opsBox,output);panel.insertBefore(assignments,output);
   }
-  let opsKey='';
+  let opsKey='', watchSection, guard;
   function renderOps() {
     if(!extras || !opsBox)return;
-    const personal=ops.personal;
+    const personal=ops.personal?.cleared && Date.now()-ops.personal.at>=10000 ? null : ops.personal;
     const lines=[...(ops.instructions || [])];
     if(personal)lines.unshift('@'+personal.by+(personal.cleared?' cleared your order':' has issued you an order: '+personal.text));
     const signal=JSON.stringify([lines,personal?.at]);
@@ -469,9 +479,10 @@
     let watcher=extras.querySelector('.watchers');if(!watcher){watcher=element('div','watchers');extras.append(watcher);}watcher.textContent=watchers;
     positionFight();
     opsBox.hidden=assignments.hidden=!me?.leader;
-    shareButton.textContent=share?(Date.now()-(ops.sampleAt || 0)<90000?'Sharing energy, booster & travel · Turn off':'Sharing enabled · waiting for a limited-key reading'):'Share my energy, booster & travel with leaders';
+    watchSection.hidden=!me?.leader || !ops.warActive;
+    if(guard){const id=new URLSearchParams(location.search).get('user2ID');const inside=order?.text==='INSIDE HITS ONLY'||(ops.instructions||[]).some(x=>x.startsWith('INSIDE HITS ONLY'));guard.hidden=!(currentPage()==='Attack' && inside && ops.warActive && ops.enemyRosterFresh && id && !(ops.enemyIds||[]).includes(id));}
     if(!me?.leader || !panel.open)return;
-    options(recipient,(ops.members || []).map(n=>[n,n]));
+    options(recipient,(ops.available || []).map(n=>[n,n]));
     const before=watchList.dataset.options;
     options(watchList,(ops.enemies || []).map(m=>[m.id,m.name+(m.online?' · online':'')]));
     if(before!==watchList.dataset.options)for(const o of watchList.options)o.selected=(ops.watchIds || []).includes(o.value);
@@ -569,7 +580,9 @@
     news.className='news';
     fillTargets();
     panel.ontoggle = () => {if(panel.open) fillTargets(); render();};
-    panel.append(title,presence,leaders,output,news);
+    const onlineTab=element('details','');onlineTab.append(element('summary','','Online now'),presence);
+    const globalTab=element('details','');globalTab.append(element('summary','','Global orders'),leaders);
+    panel.append(title,onlineTab,globalTab,output,news);
     if (!key) {
       const form = document.createElement('form');
       const input = document.createElement('input');
@@ -595,9 +608,10 @@
     attackAlert=element('button','fightAlert');attackAlert.hidden=true;attackAlert.onclick=()=>{fightUntil=0;attackAlert.hidden=true;};
     extras=element('div','signals');
     buildOps();
-    root.append(style,flash,attackAlert,owner,extras,panel);
-    layout(host,news);
-    setInterval(()=>{if(document.hidden)return;positionFight();for(const time of root.querySelectorAll('time[data-stamp]')) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
+    guard=element('aside','banner','CHAIN BONUS WARNING · Outside target. Return to the faction war and select an enemy.');guard.hidden=true;guard.setAttribute('role','alert');
+    root.append(style,flash,attackAlert,guard,owner,extras,panel);
+    if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.hidden=true;host.style.cssText='position:fixed;top:0;left:0;right:0;z-index:2147483644;pointer-events:none';document.body.append(host);}
+    setInterval(()=>{if(document.hidden)return;positionFight();renderOps();for(const time of root.querySelectorAll('time[data-stamp]')) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
   }
   connect();
