@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.6.1
+// @version      0.7.0
 // @match        https://www.torn.com/factions.php*
 // @run-at       document-start
 // @grant        none
@@ -14,6 +14,7 @@
   window.__fwRelay = true;
   let socket, authenticated = false, status = 'Torn key needed', feed = [], panel, output, title;
   const pending = new Map();
+  const sentObservations = new Map();
   const RELAY_URL = 'ws://100.103.255.117:8787/relay';
   const TORN_API_KEY = '###PDA-APIKEY###';
   const validKey = value => /^[a-zA-Z0-9]{16}$/.test(value);
@@ -21,8 +22,33 @@
   let retry;
   let revision, me, order, rosterAt = 0, online = [], leaders, target, directive, presence, owner, notice;
   const candidates = new Map();
-  const commands = ['EVERYONE TURTLE','EVERYONE PILE ON','DRAG CHAIN OUT','AIMING FOR 1k CHAIN','INSIDE HITS ONLY','Clear order'];
+  const commands = ['EVERYONE TURTLE','EVERYONE PILE ON','DRAG CHAIN OUT','AIMING FOR 1k CHAIN','INSIDE HITS ONLY','Clear order','BUILD CHAIN','CHAIN DENIAL, HOSP ONLINERS'];
+  let ops={}, share=false, nextIntel=0, chainObservation=null, opsBox, assignments, recipient, memberCommand, watchList, extras, attackAlert, shareButton;
+  let previousFights=null, fightUntil=0, selectedFight=null, previousSignal=null;
+  try {share=localStorage.getItem('fw.shareReadiness')==='yes';} catch {}
+  const endpoint = path => RELAY_URL.replace(/^ws/,'http').replace('/relay',path);
+  async function refreshIntel(){
+    if(Date.now()<nextIntel || (!sessionToken && !authenticated))return;
+    nextIntel=Date.now()+30000;
+    if(authenticated){socket.send(JSON.stringify({type:'intel',key,share}));return;}
+    try { await postNative(endpoint('/intel'),'Bearer '+sessionToken,{}, {'X-Torn-Key':key,'X-Share':share?'yes':'no'}); } catch {}
+  }
   function accept(data) {
+    ops=data.ops || {};
+    if(Array.isArray(data.attackChanges)){
+      const entries=new Map(feed.map(a=>[a.id,a]));
+      for(const id of data.removedAttacks || [])entries.delete(id);
+      for(const a of data.attackChanges)entries.set(a.id,a);
+      data.attacks=[...entries.values()].sort((a,b)=>b.at-a.at);
+    }
+    const recent=data.attacks || [];
+    const signatures=new Map(recent.map(a=>[a.id,JSON.stringify([a.result,a.live,a.attackerLife,a.defenderLife])]));
+    if(!previousFights){selectedFight=recent.find(a=>a.live && Date.now()-(a.sampleAt||a.at)<15000);if(selectedFight)fightUntil=Date.now()+7500;}
+    if(previousFights){
+      const changed=recent.filter(a=>signatures.get(a.id)!==previousFights.get(a.id) && Date.now()-(a.sampleAt || a.at)<45000);
+      if(changed.length){selectedFight=changed.sort((a,b)=>(b.sampleAt||b.at)-(a.sampleAt||a.at))[0];fightUntil=Date.now()+7500;}
+    }
+    previousFights=signatures;
     me = data.me; order = data.order; online = data.online || []; rosterAt = data.rosterAt || 0;
     feed = data.attacks || [];
   }
@@ -108,13 +134,19 @@
         }
       } else owner.replaceChildren();
     }
+    renderOps();
     if (!panel.open) return;
     leaders.hidden=!me?.leader;
-    const rosterKey=JSON.stringify([online,rosterAt]);
+    const rosterKey=JSON.stringify([online,rosterAt,me?.leader]);
     if (rosterKey!==lastRoster) {
       lastRoster=rosterKey;
       const grid=element('ul','people');
-      for (const name of [...online].sort((a,b)=>a.localeCompare(b))) grid.append(element('li','',name));
+      for (const name of [...online].sort((a,b)=>a.localeCompare(b))) {
+        const cell=element('li','','');
+        if(me?.leader){const b=element('button','member',name);b.onclick=()=>{recipient.value=name;assignments.open=true;assignments.scrollIntoView({block:'nearest'});};cell.append(b);}
+        else cell.textContent=name;
+        grid.append(cell);
+      }
       presence.replaceChildren(element('h4','','Online now · '+online.length),grid,clock(rosterAt));
     }
     const feedKey=JSON.stringify(feed);
@@ -122,8 +154,8 @@
       lastFeed=feedKey;
       const items=feed.map(r=>{
         const item=element('article','fight');
-        item.append(element('b',r.live?'live':'result',r.live?'LIVE FIGHT':r.result || (r.finished?'Outcome unavailable':'Observed')),clock(r.at));
-        const fighter=(name,life)=> (name && name!=='0'?name:'Unknown') + (r.live && life!=null?' (life '+life+')':'');
+        item.append(element('b',r.live?'live':'result',r.live?'LIVE FIGHT':r.result || (r.finished?'Outcome unavailable':'Observed')),clock(r.sampleAt || r.at));
+        const fighter=(name,life)=> (name && name!=='0'?name:'Unknown') + (r.live?' (last HP '+(life??'?')+')':'');
         item.append(element('div','fighters',fighter(r.attacker,r.attackerLife)+' → '+fighter(r.defender,r.defenderLife)));
         return item;
       });
@@ -131,8 +163,8 @@
     }
   }
   function flush() {
-    if (!authenticated || socket.readyState !== 1 || !pending.size) return;
-    socket.send(JSON.stringify({type:'observe', attacks:[...pending.values()]}));
+    if (!authenticated || socket.readyState !== 1 || (!pending.size && !chainObservation)) return;
+    socket.send(JSON.stringify({type:'observe',chain:chainObservation, attacks:[...pending.values()]}));
     pending.clear();
   }
   let sessionToken;
@@ -175,13 +207,14 @@
       }
       const batch = [...pending.values()];
       if (!feed.length && status !== 'Connected · PDA') { status = 'Syncing with PC'; render(); }
-      const res = await post('/sync', 'Bearer ' + sessionToken, {attacks:batch,revision});
+      const res = await post('/sync', 'Bearer ' + sessionToken, {attacks:batch,revision,delta:true,chain:chainObservation});
       if (Number(res.status) === 401) sessionToken = null;
       if (Number(res.status) !== 200) throw Error('Sync HTTP ' + (res.status || 0));
       const data = JSON.parse(res.responseText);
       if (!data.unchanged) { accept(data); revision = data.revision; }
       if (rosterAt && Date.now()-rosterAt > 45000) await postNative(base+'/roster','Bearer '+sessionToken,{}, {'X-Torn-Key':key});
       for (const row of batch) if (pending.get(row.id) === row) pending.delete(row.id);
+      void refreshIntel();
       status = 'Connected · PDA';
       panel?.querySelector('form')?.remove();
     } catch (err) {
@@ -206,14 +239,15 @@
     render();
     try { socket = new WebSocket(RELAY_URL); } catch { return fallback(); }
     socket.onerror = () => { status = 'WebSocket blocked or unreachable'; render(); };
-    socket.onopen = () => socket.send(JSON.stringify({type:'auth', key}));
+    socket.onopen = () => socket.send(JSON.stringify({type:'auth',delta:true, key}));
     socket.onmessage = e => {
       let data;
       try { data = JSON.parse(e.data); } catch { return; }
       if (data.type === 'orderDenied') {notice.textContent='Order refused. Check your faction role.';return;}
-      if (data.type !== 'snapshot' || !Array.isArray(data.attacks)) return;
+      if (data.type !== 'snapshot' || !(Array.isArray(data.attacks)||Array.isArray(data.attackChanges))) return;
       authenticated = true;
       status = 'Connected';
+      void refreshIntel();
       panel?.querySelector('form')?.remove();
       accept(data);
       render();
@@ -228,8 +262,12 @@
       if (e.code !== 1008) retry = setTimeout(connect,10000);
     };
   }
-  setInterval(() => {if (authenticated) socket.send(JSON.stringify({type:'roster',key}));},45000);
-  function observe(data) {
+  setInterval(() => {if (authenticated) {socket.send(JSON.stringify({type:'roster',key}));void refreshIntel();}},45000);
+  function observe(data, sampleAt=Date.now()) {
+    const own=String(data?.factionID ?? data?.warDesc?.factionID ?? '')==='55412';
+    const source=data?.wars?.find?.(w=>w.key==='chain'||w.type==='chain')?.data ?? data?.warDesc ?? data;
+    const count=source?.chainBar?.chain ?? source?.chain?.chain;
+    if(own && count!=null && Number.isSafeInteger(Number(count)))chainObservation={count:Number(count),at:sampleAt};
     const members = data?.rankedWarMembers || data?.warDesc?.members;
     if (members && typeof members === 'object') {
       const fresh = new Map();
@@ -256,7 +294,13 @@
           const n = raw?.current ?? raw;
           return (typeof n === 'number' || typeof n === 'string' && /^\d+$/.test(n)) && Number.isSafeInteger(Number(n)) && Number(n)>=0 ? Number(n) : null;
         };
-        pending.set(id,{id,result:typeof r.result === 'string' ? r.result : '',attackerLife:live ? life(aid) : null,defenderLife:live ? life(did) : null,pair,live,finished:!live,at:time > 1e12 ? time : time*1000,attacker:label(aid,r.attackerName ?? r.attacker),defender:label(did,r.defenderName ?? r.defender)});
+        const report={id,sampleAt,result:typeof r.result === 'string' ? r.result : '',attackerLife:live ? life(aid) : null,defenderLife:live ? life(did) : null,pair,live,finished:!live,at:time > 1e12 ? time : time*1000,attacker:label(aid,r.attackerName ?? r.attacker),defender:label(did,r.defenderName ?? r.defender)};
+        const signature=JSON.stringify({...report,sampleAt:0});
+        const prior=sentObservations.get(id);
+        if(prior?.signature===signature && (!live || sampleAt-prior.at<15000))continue;
+        sentObservations.set(id,{signature,at:sampleAt});
+        if(sentObservations.size>300)sentObservations.delete(sentObservations.keys().next().value);
+        pending.set(id,report);
         if (pending.size > 100) pending.delete(pending.keys().next().value);
       }
     }
@@ -267,14 +311,16 @@
   };
   const original = window.fetch;
   window.fetch = async function(...args) {
+    const sampleAt=Date.now();
     const res = await original.apply(this,args);
-    if (relevant(res.url)) { try { res.clone().json().then(observe).catch(() => {}); } catch {} }
+    if (relevant(res.url)) { try { res.clone().json().then(data=>observe(data,sampleAt)).catch(() => {}); } catch {} }
     return res;
   };
   const open = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(method,url,...rest) {
+    const sampleAt=Date.now();
     if (relevant(url)) this.addEventListener('load',function() {
-      try { if (relevant(this.responseURL)) observe(this.responseType === 'json' ? this.response : JSON.parse(this.responseText)); } catch {}
+      try { if (relevant(this.responseURL)) observe(this.responseType === 'json' ? this.response : JSON.parse(this.responseText),sampleAt); } catch {}
     },{once:true});
     return open.call(this,method,url,...rest);
   };
@@ -355,6 +401,98 @@
       if(!timer) timer=setTimeout(()=>{timer=null;locate();},700);
     }).observe(document.body,{childList:true,subtree:true});
   }
+  function positionFight() {
+    if(!attackAlert)return;
+    attackAlert.hidden=!selectedFight || Date.now()>=fightUntil;
+    if(attackAlert.hidden)return;
+    const a=selectedFight;
+    const fighter=(name,hp)=> (name && name!=='0'?name:'Unknown')+(a.live?' · HP '+(hp??'?'):'');
+    attackAlert.textContent=(a.live?'LIVE':a.result || 'Attack ended')+'   '+fighter(a.attacker,a.attackerLife)+' → '+fighter(a.defender,a.defenderLife)+' · '+elapsed(a.sampleAt || a.at)+' ago';
+    const bar=visibleIconRow()?.getBoundingClientRect();
+    attackAlert.style.position=bar?'fixed':'relative';
+    attackAlert.style.top=bar?Math.ceil(Math.max(bar.bottom,flash.hidden?0:flash.getBoundingClientRect().bottom))+'px':'';
+  }
+  async function sendAction(scope,command,target,ids) {
+    const payload={type:'order',scope,command,target,ids};
+    try {
+      if(authenticated)socket.send(JSON.stringify(payload));
+      else {
+        const r=await postNative(endpoint('/order'),'Bearer '+sessionToken,payload);
+        if(Number(r.status)!==200)throw Error();
+      }
+      notice.textContent=' Sent';
+    } catch {notice.textContent=' Order refused or relay offline';}
+  }
+  function options(select,list) {
+    const sig=JSON.stringify(list);
+    if(select.dataset.options===sig)return;
+    const selected=[...select.selectedOptions].map(o=>o.value);
+    select.replaceChildren(...list.map(([id,name])=>new Option(name,id)));
+    for(const o of select.options)if(selected.includes(o.value))o.selected=true;
+    select.dataset.options=sig;
+  }
+  function buildOps() {
+    shareButton=element('button','share');
+    shareButton.onclick=()=>{share=!share;try{localStorage.setItem('fw.shareReadiness',share?'yes':'no');}catch{}nextIntel=0;void refreshIntel();renderOps();};
+    opsBox=element('details','headcount');
+    opsBox.append(element('summary','','Energy headcount'),element('div','readings'));
+    assignments=element('details','assignments');
+    assignments.append(element('summary','','Member orders and chain watch'));
+    recipient=element('select','');recipient.setAttribute('aria-label','Faction member');
+    memberCommand=element('select','');
+    options(memberCommand,['SIT ABROAD (CLOSE)','SIT ABROAD (FAR)','TURTLE','OUTSIDE HITS ONLY','INSIDE HITS ONLY','BUILD CHAIN','Clear personal order','Assign watcher','Remove watcher'].map(s=>[s,s]));
+    const issue=element('button','','Apply to member');
+    issue.onclick=()=>sendAction('member',memberCommand.value,recipient.value);
+    watchList=element('select','');watchList.multiple=true;watchList.size=4;
+    const enable=element('button','','Build chain · watch selected');
+    enable.onclick=()=>sendAction('watch','Watch enemies','',[...watchList.selectedOptions].map(o=>o.value));
+    const disable=element('button','','Stop enemy watch');disable.onclick=()=>sendAction('watch','Stop watching enemies');
+    assignments.append(recipient,memberCommand,issue,element('h4','','Watch for online opponents'),watchList,enable,disable);
+    panel.insertBefore(opsBox,output);panel.insertBefore(assignments,output);panel.append(shareButton);
+  }
+  let opsKey='';
+  function renderOps() {
+    if(!extras || !opsBox)return;
+    const personal=ops.personal;
+    const lines=[...(ops.instructions || [])];
+    if(personal)lines.unshift('@'+personal.by+(personal.cleared?' cleared your order':' has issued you an order: '+personal.text));
+    const signal=JSON.stringify([lines,personal?.at]);
+    if(signal!==previousSignal){
+      const first=previousSignal===null;
+      previousSignal=signal;
+      extras.replaceChildren(...lines.map(line=>element('div','signal',line)));
+      if(lines.length && (!first || (personal && Date.now()-personal.at<30000))){
+        dismissFlash();flash.replaceChildren(element('small','','WAR DIRECTION'),element('b','command',lines.join(' · ')));showFlash();
+      }
+    }
+    const watchers='Chain watchers: '+((ops.watchers || []).join(', ') || 'unassigned');
+    let watcher=extras.querySelector('.watchers');if(!watcher){watcher=element('div','watchers');extras.append(watcher);}watcher.textContent=watchers;
+    positionFight();
+    opsBox.hidden=assignments.hidden=!me?.leader;
+    shareButton.textContent=share?(Date.now()-(ops.sampleAt || 0)<90000?'Sharing energy, booster & travel · Turn off':'Sharing enabled · waiting for a limited-key reading'):'Share my energy, booster & travel with leaders';
+    if(!me?.leader || !panel.open)return;
+    options(recipient,(ops.members || []).map(n=>[n,n]));
+    const before=watchList.dataset.options;
+    options(watchList,(ops.enemies || []).map(m=>[m.id,m.name+(m.online?' · online':'')]));
+    if(before!==watchList.dataset.options)for(const o of watchList.options)o.selected=(ops.watchIds || []).includes(o.value);
+    const members=ops.resources || [], now=Date.now();
+    const fresh=members.filter(m=>Number.isFinite(m.energy)&&now-m.at<=90000);
+    const ready=fresh.filter(m=>m.online && m.status==='Okay');
+    const sum=list=>list.reduce((n,m)=>n+m.energy,0);
+    const label='Energy · '+sum(ready)+'E online & Okay · '+fresh.length+'/'+members.length+' fresh';
+    opsBox.firstChild.textContent=label;
+    const sig=JSON.stringify([members,ready.length,Math.floor(now/5000)]);
+    if(sig===opsKey)return;opsKey=sig;
+    const readings=opsBox.lastChild;
+    const delta=t=>elapsed(now-Math.max(0,t-now));
+    readings.replaceChildren(element('p','','Reported total: '+sum(fresh)+'E · readings older than 1:30 excluded'));
+    for(const m of members.filter(m=>m.at).sort((a,b)=>b.energy-a.energy)){
+      readings.append(element('div','reading',m.name+' · '+m.energy+'E · '+m.status+
+        ' · booster '+(m.boosterUntil==null?'unknown':m.boosterUntil<=now?'ready':delta(m.boosterUntil))+
+        (m.landAt?' · '+m.destination+' ETA '+new Date(m.landAt).toLocaleTimeString():m.destination?' · '+m.destination:'')+
+        ' · seen '+elapsed(m.at)+' ago'));
+    }
+  }
   function mount() {
     const host = document.createElement('div');
     host.style.cssText='display:block;position:relative;width:100%;min-width:0;box-sizing:border-box;margin:8px 0;clear:both';
@@ -388,6 +526,11 @@
       .age{font:12px system-ui;color:#becbd3;font-variant-numeric:tabular-nums}
       .fighters{grid-column:1/-1;overflow-wrap:anywhere}.live{color:#ffcd65}.result{color:#d7e9f0}
       .controls{display:flex;gap:5px;flex-wrap:wrap}button.news{margin:0 12px 10px}
+    `;
+    style.textContent+=`
+      .signal{padding:8px 12px;background:#63471b;color:#fff3cd;font-weight:750}.watchers,.reading{padding:5px 10px;background:#253038;color:#ecf2f5}
+      .fightAlert{z-index:2147483645;left:0;right:0;width:100%;background:#263944eb;color:white;padding:6px 10px;border:0;border-radius:0;text-align:left;font-size:12px}
+      .member{background:transparent;border:0;color:inherit;padding:2px}.headcount,.assignments,.share{margin:7px}.assignments select,.assignments button{margin:3px;max-width:96%}
     `;
     panel = document.createElement('details');
     title = document.createElement('summary');
@@ -449,9 +592,12 @@
         connect();
       };
     }
-    root.append(style,flash,owner,panel);
+    attackAlert=element('button','fightAlert');attackAlert.hidden=true;attackAlert.onclick=()=>{fightUntil=0;attackAlert.hidden=true;};
+    extras=element('div','signals');
+    buildOps();
+    root.append(style,flash,attackAlert,owner,extras,panel);
     layout(host,news);
-    setInterval(()=>{if(document.hidden)return;for(const time of root.querySelectorAll('time[data-stamp]')) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
+    setInterval(()=>{if(document.hidden)return;positionFight();for(const time of root.querySelectorAll('time[data-stamp]')) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
   }
   connect();
