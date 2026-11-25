@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.2.0
+// @version      0.3.0
 // @match        https://www.torn.com/factions.php*
 // @run-at       document-start
 // @grant        none
@@ -12,16 +12,13 @@
   'use strict';
   if (window.top !== window.self || window.__fwRelay) return;
   window.__fwRelay = true;
-  let socket, authenticated = false, status = 'Setup required', feed = [], panel, output, title;
+  let socket, authenticated = false, status = 'Torn key needed', feed = [], panel, output, title;
   const pending = new Map();
-  const pdaKey = '###PDA-APIKEY###';
-  let key = /^[a-zA-Z0-9]{16}$/.test(pdaKey) ? pdaKey : '';
-  let config;
+  const RELAY_URL = 'wss://desktop-irkpup3.tail6d7050.ts.net:8443/relay';
+  const TORN_API_KEY = '###PDA-APIKEY###';
+  const validKey = value => /^[a-zA-Z0-9]{16}$/.test(value);
+  let key = validKey(TORN_API_KEY) ? TORN_API_KEY : '';
   let retry;
-  try {
-    const url = localStorage.getItem('fwRelayApprovedUrl');
-    if (url && new URL(url).protocol === 'wss:') config = {url};
-  } catch {}
   function render() {
     if (!title) return;
     title.textContent = 'War relay · ' + status;
@@ -34,10 +31,10 @@
   }
   function connect() {
     clearTimeout(retry);
-    if (!config || !key) return;
+    if (!key) return;
     status = 'Connecting';
     render();
-    try { socket = new WebSocket(config.url); } catch { status = 'WebSocket blocked'; render(); return; }
+    try { socket = new WebSocket(RELAY_URL); } catch { status = 'WebSocket blocked'; render(); return; }
     socket.onopen = () => socket.send(JSON.stringify({type:'auth', key}));
     socket.onmessage = e => {
       let data;
@@ -45,6 +42,7 @@
       if (data.type !== 'snapshot' || !Array.isArray(data.attacks)) return;
       authenticated = true;
       status = 'Connected';
+      panel?.querySelector('form')?.remove();
       feed = data.attacks;
       render();
       flush();
@@ -86,29 +84,46 @@
     return open.call(this,method,url,...rest);
   };
   function mount() {
+    const host = document.createElement('div');
+    host.style.cssText = 'all:initial;position:fixed;bottom:12px;left:8px;z-index:99999';
+    const root = host.attachShadow({mode:'closed'});
+    const style = document.createElement('style');
+    style.textContent = `
+      details { color-scheme:dark; background:#182123; color:#f3f6f6; border:1px solid #55676b; padding:7px 10px; font:13px/1.45 system-ui; border-radius:6px; max-width:85vw }
+      summary { cursor:pointer }
+      pre { max-height:25vh; overflow:auto; white-space:pre-wrap; font:inherit }
+      input,button { background:#29383c; color:#fff; border:1px solid #839498; border-radius:4px; padding:6px; font:inherit }
+      input::placeholder { color:#c6d0d2 }
+      form { display:flex; gap:4px; flex-wrap:wrap }
+    `;
     panel = document.createElement('details');
-    panel.style.cssText = 'position:fixed;bottom:12px;left:8px;z-index:99999;background:#182123;color:white;padding:7px;font:12px system-ui;border-radius:5px;max-width:85vw';
     title = document.createElement('summary');
     output = document.createElement('pre');
-    output.style.cssText = 'max-height:25vh;overflow:auto;white-space:pre-wrap';
-    const settings = document.createElement('button');
-    settings.textContent = 'Connect / change relay';
-    settings.onclick = () => {
-      const url = prompt('Your faction relay (wss://host/relay)',config?.url || '');
-      if (!url) return;
-      try { if (new URL(url).protocol !== 'wss:') throw Error(); } catch { alert('Enter a secure wss:// address'); return; }
-      const enteredKey = /^[a-zA-Z0-9]{16}$/.test(pdaKey) ? pdaKey : prompt('Torn public-access API key for this relay');
-      if (!enteredKey || !/^[a-zA-Z0-9]{16}$/.test(enteredKey.trim())) return;
-      if (!confirm('Send your Torn API key to ' + new URL(url).host + ' to verify faction membership?')) return;
-      key = enteredKey.trim();
-      config = {url};
-      try {localStorage.setItem('fwRelayApprovedUrl',url);} catch {}
-      if (socket) {socket.onclose=null; socket.close();}
-      authenticated=false;
-      connect();
-    };
-    panel.append(title,output,settings);
-    document.body.append(panel);
+    panel.append(title,output);
+    if (!key) {
+      const form = document.createElement('form');
+      const input = document.createElement('input');
+      input.type = 'password';
+      input.placeholder = 'Public-access Torn API key';
+      input.setAttribute('aria-label',input.placeholder);
+      input.required = true;
+      input.pattern = '[a-zA-Z0-9]{16}';
+      const submit = document.createElement('button');
+      submit.textContent = 'Sign in';
+      form.append(input,submit);
+      panel.append(form);
+      form.onsubmit = event => {
+        event.preventDefault();
+        if (!validKey(input.value)) return;
+        key = input.value;
+        input.value = '';
+        if (socket) {socket.onclose = null; socket.close();}
+        authenticated = false;
+        connect();
+      };
+    }
+    root.append(style,panel);
+    document.body.append(host);
     render();
   }
   connect();
