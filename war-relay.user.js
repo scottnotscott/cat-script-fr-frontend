@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.2
+// @version      0.9.3
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
@@ -95,6 +95,11 @@
     if (flash) flash.hidden=true;
   }
   function showFlash() {
+    dismissFlash();
+    if(!isWarView())return;
+    flash.hidden=false;flash.classList.remove('anchored');flash.style.removeProperty('top');flashTimer=setTimeout(dismissFlash,10000);
+  }
+  function unusedOverlayFlash() {
     flash.hidden=false;
     let row, frame, searchAfter=0;
     function place() {
@@ -115,6 +120,7 @@
     stopTracking=()=>{clearInterval(timer);cancelAnimationFrame(frame);window.removeEventListener('scroll',schedule,true);window.removeEventListener('resize',schedule);stopTracking=()=>{};};
     flashTimer=setTimeout(dismissFlash,10000);
   }
+  function isWarView(){const q=new URLSearchParams(location.search);const h=location.hash;return location.pathname==='/factions.php'&&q.get('step')!=='rankreport'&&q.get('step')!=='profile'&&(!q.get('type')||q.get('type')==='1')&&!h.includes('tab=')&&!/^#\/war\/\d+$/.test(h)&&(!h||h==='#/'||h.startsWith('#/war'));}
   function render() {
     if (!title) return;
     title.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status);
@@ -122,7 +128,7 @@
     const signature=JSON.stringify(order || null);
     if (signature!==lastOrder) {
       lastOrder=signature;
-      owner.hidden=!order;
+      owner.hidden=!order||!isWarView();
       dismissFlash();
       if (order) {
         const command=element('b','command',order.text);
@@ -424,9 +430,8 @@
     const a=selectedFight;
     const fighter=(name,hp)=> (name && name!=='0'?name:'Unknown')+(a.live?' · HP '+(hp??'?'):'');
     if(a.live){const bars=element('div','hpgrid');bars.append(hpBar(a.attacker,a.attackerLife,a.attackerMax),hpBar(a.defender,a.defenderLife,a.defenderMax));attackAlert.replaceChildren(element('small','','LIVE · '+elapsed(a.sampleAt||a.at)+' ago'),bars);}else attackAlert.textContent=outcome(a)+' · '+fighter(a.attacker)+' → '+fighter(a.defender);
-    const bar=visibleIconRow()?.getBoundingClientRect();
-    attackAlert.style.position=bar?'fixed':'relative';
-    attackAlert.style.top=bar?Math.ceil(Math.max(bar.bottom,flash.hidden?0:flash.getBoundingClientRect().bottom))+'px':'';
+    attackAlert.style.position='static';attackAlert.style.removeProperty('top');
+    if(!isWarView())attackAlert.hidden=true;
   }
   async function sendAction(scope,command,target,ids) {
     const payload={type:'order',scope,command,target,ids};
@@ -468,7 +473,43 @@
     rosterTabs.append(opsBox);opsBox.hidden=true;panel.insertBefore(assignments,output);
   }
   let opsKey='', watchSection, guard, personalHeader, rosterTabs, headerRect, roomTabs, primarySelect, secondarySelect, watcherSettings, activeOrders, watcherSignature='', slotSignature='';
-  function placePersonal(personal){if(!personalHeader)return;personalHeader.hidden=!personal||personal.cleared;if(personalHeader.hidden)return;personalHeader.textContent=personal.text;const logo=document.querySelector('a[href="/"],a[href="/index.php"],#logo,.logo');const search=document.querySelector('[aria-label*="search" i],[title="Search"],button[class*="search"]');const menu=document.querySelector('[aria-label*="menu" i],button[class*="burger"]');const a=logo?.getBoundingClientRect(),b=search?.getBoundingClientRect(),c=menu?.getBoundingClientRect();const left=Math.max(a?.right||0,c?.right||0)+4;if(!headerRect&&a&&b&&b.left-left>40&&Math.abs(a.top-b.top)<40&&a.top>=0&&a.top<100)headerRect={left,width:b.left-left-4,top:a.top,height:Math.max(20,a.height)};if(headerRect){const r=headerRect;personalHeader.style.cssText='position:fixed;left:'+r.left+'px;top:'+r.top+'px;width:'+r.width+'px;height:'+r.height+'px;font-size:'+Math.max(9,Math.min(14,r.width/(personal.text.length*.58)))+'px';}else personalHeader.hidden=true;}
+  function placePersonal(personal){
+    if(!personalHeader)return;
+    const activePersonal=personal&&!personal.cleared?personal:null;
+    const shown=isWarView()?activePersonal:(order||activePersonal);
+    personalHeader.hidden=true;if(!shown)return;
+    const logo=document.querySelector('a[href="/"],a[href="/index.php"],#logo,.logo');
+    const search=document.querySelector('[aria-label*="search" i],[title="Search"],button[class*="search"]');
+    const menu=document.querySelector('[aria-label*="menu" i],button[class*="burger"]');
+    const a=logo?.getBoundingClientRect(),b=search?.getBoundingClientRect(),c=menu?.getBoundingClientRect();
+    const left=Math.max(a?.right||0,c?.right||0)+4;
+    if(!a||!b||a.top<0||a.bottom>innerHeight||a.top>120||Math.abs(a.top-b.top)>=40||b.left-left<25)return;
+    personalHeader.textContent=shown.text;personalHeader.title=shown.text;
+    personalHeader.style.cssText='position:fixed;left:'+left+'px;top:'+a.top+'px;width:'+(b.left-left-4)+'px;height:'+Math.max(16,a.height)+'px;font-size:'+Math.max(8,Math.min(13,(b.left-left-4)/(shown.text.length*.58)))+'px';
+    personalHeader.hidden=false;
+  }
+  let flowHost, roomHost, newsControl, watcherNode, flowRoot;
+  function positionFlow(){
+    if(!flowHost||!roomHost)return;
+    const war=isWarView();
+    roomHost.hidden=!war;
+    owner.hidden=!war||!order;
+    panel.hidden=!war;
+    if(!war){flash.hidden=true;attackAlert.hidden=true;}
+    const row=visibleIconRow();
+    // Insert a sibling in normal flow, not a child of a flex icon tray.
+    let anchor=row;
+    if(anchor){while(anchor.parentElement && anchor.parentElement!==document.body && /^(flex|inline-flex|grid|inline-grid)$/.test(getComputedStyle(anchor.parentElement).display)){const p=anchor.parentElement;const r=p.getBoundingClientRect();if(r.height>160)break;anchor=p;}}
+    if(anchor?.parentElement && !flowHost.contains(anchor) && !roomHost.contains(anchor)){
+      if(anchor.nextElementSibling!==flowHost)anchor.after(flowHost);
+    }else if(!flowHost.isConnected){
+      const combat=document.querySelector('[class*="appHeaderWrapper___"],[class*="dialogButtons___"]');
+      const main=document.querySelector('#mainContainer,main,.content-wrapper');
+      if(combat)combat.after(flowHost);else if(main)main.prepend(flowHost);
+    }
+    // A missing safe anchor must never result in a viewport-covering fallback.
+    if(!flowHost.isConnected)flowHost.hidden=true;else flowHost.hidden=false;
+  }
 
   function renderOps() {
     if(!extras || !opsBox)return;
@@ -485,16 +526,16 @@
       }
     }
     const secs=Math.max(0,Math.ceil(((ops.chain?.endsAt||0)-Date.now())/1000));const timer=ops.chain?.endsAt?Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0'):'--:--';
-    const watchers='🔗 '+(ops.chain?.count||0)+' · '+(ops.chain?.count?timer:'No active chain')+' · '+(ops.claim?ops.claim.name+' has next hit':'Next hit unclaimed');
-    let watcher=extras.querySelector('.watchers');if(!watcher){watcher=element('div','watchers');extras.append(watcher);}
+    const watchers='🔗 '+(ops.chain?.count||0)+' · '+(ops.chain?.count?timer:'Inactive')+' · '+(ops.claim?ops.claim.name+' next':'Unclaimed');
+    let watcher=watcherNode;if(!watcher){watcher=watcherNode=element('div','watchers');flowRoot.append(watcher);}
     const slots=ops.watchSlots||{primary:ops.watchers?.[0],secondary:ops.watchers?.[1]};
     const watchSig=JSON.stringify([slots,ops.watcherEnergy,ops.claim,me?.name]);
     watcher.hidden=!slots.primary&&!slots.secondary;
-    if(watcherSignature!==watchSig||!watcher.firstChild){watcherSignature=watchSig;const heading=element('div','watchTitle');const grid=element('div','watchGrid');for(const [role,name] of Object.entries(slots)){if(!name)continue;const m=(ops.watcherEnergy||[]).find(v=>v.name===name);const card=element('div','watchMember');card.append(element('small','',role.toUpperCase()),element('b','',name),element('span','','⚡ '+(m?.energy??'?')+'/'+(m?.maxEnergy??'?')));if(ops.claim?.name===name)card.append(element('span','claimed','NEXT HIT RESERVED'));if(name===me?.name){const b=element('button','claim',ops.claim?.name===name?'Release hit':'I have next hit');b.disabled=!!ops.claim&&ops.claim.name!==name;b.onclick=()=>sendAction('claim',ops.claim?.name===name?'Release next hit':'Claim next hit');card.append(b);}grid.append(card);}watcher.replaceChildren(heading,grid);}
+    if(watcherSignature!==watchSig||!watcher.firstChild){watcherSignature=watchSig;const heading=element('div','watchTitle');const grid=element('div','watchGrid');for(const [role,name] of Object.entries(slots)){if(!name)continue;const m=(ops.watcherEnergy||[]).find(v=>v.name===name);const card=element('div','watchMember');card.append(element('span','watchName',(role==='primary'?'P':'S')+' · '+name),element('span','watchEnergy','⚡'+(m?.energy??'?')+'/'+(m?.maxEnergy??'?')));if(ops.claim?.name===name)card.append(element('span','claimed','NEXT'));if(name===me?.name){const b=element('button','claim',ops.claim?.name===name?'Release':'Next hit');b.disabled=!!ops.claim&&ops.claim.name!==name;b.onclick=()=>sendAction('claim',ops.claim?.name===name?'Release next hit':'Claim next hit');card.append(b);}grid.append(card);}watcher.replaceChildren(heading,grid);}
     watcher.firstChild.textContent=watchers;
     placePersonal(personal);
-    if(personal && !personal.cleared && personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=personal.text;}else extras.querySelector('.personalFallback')?.remove();
-    positionFight();
+    if(isWarView() && personal && !personal.cleared && personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=personal.text;}else extras.querySelector('.personalFallback')?.remove();
+    positionFight();positionFlow();
     if(roomTabs){const selected=roomTabs.querySelector('.selected')?.dataset.tab;assignments.hidden=!me?.leader||selected!=='Orders';opsBox.hidden=selected!=='Energy';leaders.hidden=!me?.leader||selected!=='Orders';for(const label of ['Orders','Watch']){const b=roomTabs.querySelector('[data-tab="'+label+'"]');if(b)b.hidden=!me?.leader||(label==='Watch'&&!ops.warActive);}}
     watchSection.hidden=!me?.leader || !ops.warActive || (roomTabs && roomTabs.querySelector('.selected')?.dataset.tab!=='Watch');
     if(guard){const id=new URLSearchParams(location.search).get('user2ID');const inside=order?.text==='INSIDE HITS ONLY'||(ops.instructions||[]).some(x=>x.startsWith('INSIDE HITS ONLY'));guard.hidden=!(currentPage()==='Attack' && inside && ops.warActive && ops.enemyRosterFresh && id && !(ops.enemyIds||[]).includes(id));}
@@ -565,6 +606,7 @@
       .fightAlert{z-index:2147483645;left:0;right:0;width:100%;background:#263944eb;color:white;padding:6px 10px;border:0;border-radius:0;text-align:left;font-size:12px}
       .roomNav{display:flex;gap:3px;padding:6px;background:#171e22}.roomNav button{flex:1;min-width:0;padding:6px 2px;font-size:11px;border-color:#43535c}.roomNav button.selected{background:#45616a;color:#fff}.roomContent{padding:6px;min-height:54px}.roomContent .headcount,.roomContent .assignments{margin:0;border:0;background:transparent}.roomContent .headcount>summary,.roomContent .assignments>summary{display:none}.roomContent .roster,.roomContent .feed,.roomContent .controls{margin:3px}.watchers{border:1px solid #50616a;border-radius:5px;margin:4px 0;padding:6px!important}.watchTitle{font-weight:700}.watchMember{padding:3px 0}.roomContent .controls{display:flex;flex-direction:column;align-items:stretch;padding:10px;border:1px solid #43535c;border-radius:5px;background:#252f35;margin:0 0 9px}.roomContent .controls h4,.orderGroup h4,.activeOrders h4,.assignments h4{color:#d5e0e5;font-size:12px;letter-spacing:.035em;margin:0 0 7px}.roomContent .assignments{padding:10px;border:1px solid #43535c;border-radius:5px;background:#252f35}.assignments select,.assignments button{max-width:100%;margin:3px 0}.assignments>select{width:100%}.orderGroup,.activeOrders{border-top:1px solid #43535c;margin-top:12px;padding-top:10px}.orderGroup label{display:block;font-size:11px;color:#b8c8ce}.orderGroup select{display:block;width:100%}.orderLine{display:flex;align-items:center;justify-content:space-between;gap:5px;padding:6px 0;border-bottom:1px solid #39464d}.orderLine span{display:block;font-size:11px;color:#e8c780}.watchGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:6px}.watchMember{display:flex;flex-direction:column;gap:3px;background:#182329;border:1px solid #40535e;border-radius:4px;padding:6px!important;overflow-wrap:anywhere}.watchMember small{color:#a9bbc6;font-size:9px;letter-spacing:.06em}.watchMember .claim{margin:2px 0 0;width:100%;pointer-events:auto}.claimed{color:#91d18b;font-size:10px;font-weight:700}.hpgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.hpbar{height:5px;background:#a74040;border-radius:3px;overflow:hidden}.hpfill{height:100%;background:#77c75a}.hplabel{font-size:11px;overflow-wrap:anywhere}.claim{pointer-events:auto;margin-left:5px;font-size:11px;padding:3px}.watchers{font-size:11px}.personalHeader{z-index:2147483647;color:#ffe194;background:#252525;display:flex;align-items:center;justify-content:center;text-align:center;line-height:1;overflow:hidden;pointer-events:none}.tabrow{display:flex;gap:4px;padding:4px}.tabrow button{flex:1;font-size:12px;padding:4px}.people{grid-template-columns:1fr!important}.people li{padding:2px 5px!important}.member{background:transparent;border:0;color:inherit;padding:2px}.headcount,.assignments,.share{margin:7px}.assignments select,.assignments button{margin:3px;max-width:96%}
     `;
+    style.textContent+=`\n.watchers{margin:2px 0;padding:3px 5px!important;border-radius:3px;font-size:11px}.watchTitle{font-size:11px;line-height:15px}.watchGrid{gap:4px;margin-top:2px}.watchMember{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:3px 5px;padding:3px!important;min-width:0}.watchName{font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}.watchEnergy{white-space:nowrap;color:#d0dce0}.watchMember .claim{width:auto;margin:0;padding:2px 5px;line-height:14px;font-size:10px}.signal{padding:3px 6px;font-size:11px}.flash{position:static!important;padding:4px 6px;background:#5d4b28;color:#fff;text-shadow:none}.flash .command{font-size:12px;margin:1px 0}.flash small{font-size:9px}.fightAlert{position:static!important;padding:4px 6px}.banner{padding:5px 8px}.banner .command{font-size:15px}.banner small{font-size:9px}.issued{font-size:10px}.personalHeader{white-space:nowrap;background:transparent;text-overflow:ellipsis}`;
     panel = document.createElement('details');
     title = document.createElement('summary');
     panel.open=true;
@@ -632,10 +674,11 @@
     buildOps();
     guard=element('aside','banner','CHAIN BONUS WARNING · Outside target. Return to the faction war and select an enemy.');guard.hidden=true;guard.setAttribute('role','alert');
     roomTabs=element('div','roomTabs');const pages=[['Online',presence],['Energy',opsBox],['Orders',leaders,assignments],['Fights',output],['Watch',watchSection]];const bar=element('div','roomNav');const content=element('div','roomContent');let active='Online';function choose(name){active=name;for(const [label,...nodes] of pages){for(const n of nodes)n.hidden=label!==name;const b=bar.querySelector('[data-tab="'+label+'"]');if(b)b.classList.toggle('selected',label===name);}if(name==='Energy')opsBox.open=true;if(name==='Orders')assignments.open=true;if(name==='Watch')watchSection.open=true;render();}for(const [label,...nodes] of pages){const b=element('button','',label);b.dataset.tab=label;b.onclick=()=>choose(label);bar.append(b);for(const n of nodes)content.append(n);}roomTabs.append(bar,content);panel.insertBefore(roomTabs,news);onlineTab.remove();globalTab.remove();choose('Online');
-    personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);root.append(style,flash,attackAlert,guard,owner,extras,panel);
-    if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.hidden=true;host.style.cssText='position:fixed;top:0;left:0;right:0;z-index:2147483644;pointer-events:none';document.body.append(host);}
+    personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);root.append(style,owner,panel);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;box-sizing:border-box;clear:both';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
+    if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.hidden=true;}positionFlow();
+    let scheduled=false;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;positionFlow();});});observer.observe(document.body,{childList:true,subtree:true});window.addEventListener('hashchange',()=>{positionFlow();renderOps();});
     window.addEventListener('resize',()=>{headerRect=null;});
-    setInterval(()=>{if(document.hidden)return;positionFight();renderOps();for(const time of root.querySelectorAll('time[data-stamp]')) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
+    setInterval(()=>{if(document.hidden)return;positionFight();renderOps();for(const time of [...root.querySelectorAll('time[data-stamp]'),...flowRoot.querySelectorAll('time[data-stamp]')]) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
   }
   connect();
