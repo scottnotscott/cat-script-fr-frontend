@@ -76,7 +76,7 @@
     const selectors = '#sidebarroot [class*="status-icons"],#sidebarroot [class*="statusIcons"],#status-icons,.status-icons,[class*="iconTray"],[class*="icon-tray"],[class*="statusIcons"],[class*="status-icons"],[class*="user-information-icons"]';
     for (const node of document.querySelectorAll(selectors)) {
       const r=node.getBoundingClientRect();
-      if (r.width>80 && r.height>8 && r.height<100 && r.bottom>0 && r.top<innerHeight/2 && r.right>0 && r.left<innerWidth) return node;
+      if (r.width>80 && r.height>8 && r.height<100 && r.right>0 && r.left<innerWidth) return node;
     }
     // On mobile layouts the row may only expose individual icon tooltips.
     for (const icon of document.querySelectorAll('[title*="Points" i],[aria-label*="points" i],[data-tooltip*="points" i],#user_points')) {
@@ -98,27 +98,6 @@
     dismissFlash();
     if(!isWarView())return;
     flash.hidden=false;flash.classList.remove('anchored');flash.style.removeProperty('top');flashTimer=setTimeout(dismissFlash,10000);
-  }
-  function unusedOverlayFlash() {
-    flash.hidden=false;
-    let row, frame, searchAfter=0;
-    function place() {
-      frame=0;
-      if (!row?.isConnected || !row.getClientRects().length) {
-        if(performance.now()>=searchAfter){row=visibleIconRow();searchAfter=performance.now()+400;}
-      }
-      const r=row?.getBoundingClientRect();
-      const safe=r && r.height>0 && r.bottom>0 && r.bottom<innerHeight-65 && r.right>0 && r.left<innerWidth;
-      flash.classList.toggle('anchored',Boolean(safe));
-      if(safe) flash.style.top=Math.ceil(r.bottom)+'px';
-    }
-    function schedule(){if(!frame)frame=requestAnimationFrame(place);}
-    place();
-    const timer=setInterval(schedule,400);
-    window.addEventListener('scroll',schedule,true);
-    window.addEventListener('resize',schedule);
-    stopTracking=()=>{clearInterval(timer);cancelAnimationFrame(frame);window.removeEventListener('scroll',schedule,true);window.removeEventListener('resize',schedule);stopTracking=()=>{};};
-    flashTimer=setTimeout(dismissFlash,10000);
   }
   function isWarView(){const q=new URLSearchParams(location.search);const h=location.hash;return location.pathname==='/factions.php'&&q.get('step')!=='rankreport'&&q.get('step')!=='profile'&&(!q.get('type')||q.get('type')==='1')&&!h.includes('tab=')&&!/^#\/war\/\d+$/.test(h)&&(!h||h==='#/'||h.startsWith('#/war'));}
   function render() {
@@ -499,16 +478,16 @@
     const row=visibleIconRow();
     // Insert a sibling in normal flow, not a child of a flex icon tray.
     let anchor=row;
-    if(anchor){while(anchor.parentElement && anchor.parentElement!==document.body && /^(flex|inline-flex|grid|inline-grid)$/.test(getComputedStyle(anchor.parentElement).display)){const p=anchor.parentElement;const r=p.getBoundingClientRect();if(r.height>160)break;anchor=p;}}
+    if(anchor){while(anchor.parentElement && anchor.parentElement!==document.body && /^(flex|inline-flex|grid|inline-grid)$/.test(getComputedStyle(anchor.parentElement).display)){const p=anchor.parentElement;const r=p.getBoundingClientRect();if(r.height>160){anchor=null;break;}anchor=p;}}
     if(anchor?.parentElement && !flowHost.contains(anchor) && !roomHost.contains(anchor)){
       if(anchor.nextElementSibling!==flowHost)anchor.after(flowHost);
     }else if(!flowHost.isConnected){
-      const combat=document.querySelector('[class*="appHeaderWrapper___"],[class*="dialogButtons___"]');
+      const combat=document.querySelector('[class*="dialogButtons___"]')||document.querySelector('[class*="appHeaderWrapper___"]');
       const main=document.querySelector('#mainContainer,main,.content-wrapper');
-      if(combat)combat.after(flowHost);else if(main)main.prepend(flowHost);
+      if(combat && !/^(flex|inline-flex|grid|inline-grid)$/.test(getComputedStyle(combat.parentElement).display))combat.after(flowHost);else if(main && !/^(flex|inline-flex|grid|inline-grid)$/.test(getComputedStyle(main).display))main.prepend(flowHost);
     }
     // A missing safe anchor must never result in a viewport-covering fallback.
-    if(!flowHost.isConnected)flowHost.hidden=true;else flowHost.hidden=false;
+    flowHost.hidden=!flowHost.isConnected;
   }
 
   function renderOps() {
@@ -677,7 +656,8 @@
     personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);root.append(style,owner,panel);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;box-sizing:border-box;clear:both';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
     if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.hidden=true;}positionFlow();
     let scheduled=false;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;positionFlow();});});observer.observe(document.body,{childList:true,subtree:true});window.addEventListener('hashchange',()=>{positionFlow();renderOps();});
-    window.addEventListener('resize',()=>{headerRect=null;});
+    window.addEventListener('resize',()=>{headerRect=null;placePersonal(ops.personal);});
+    let headerFrame=0;window.addEventListener('scroll',()=>{if(!headerFrame)headerFrame=requestAnimationFrame(()=>{headerFrame=0;placePersonal(ops.personal);});},true);
     setInterval(()=>{if(document.hidden)return;positionFight();renderOps();for(const time of [...root.querySelectorAll('time[data-stamp]'),...flowRoot.querySelectorAll('time[data-stamp]')]) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
   }
