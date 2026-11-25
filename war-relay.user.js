@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.4
+// @version      0.9.5
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
@@ -410,7 +410,7 @@
     const fighter=(name,hp)=> (name && name!=='0'?name:'Unknown')+(a.live?' · HP '+(hp??'?'):'');
     if(a.live){const bars=element('div','hpgrid');bars.append(hpBar(a.attacker,a.attackerLife,a.attackerMax),hpBar(a.defender,a.defenderLife,a.defenderMax));attackAlert.replaceChildren(element('small','','LIVE · '+elapsed(a.sampleAt||a.at)+' ago'),bars);}else attackAlert.textContent=outcome(a)+' · '+fighter(a.attacker)+' → '+fighter(a.defender);
     attackAlert.style.position='static';attackAlert.style.removeProperty('top');
-    if(!isWarView())attackAlert.hidden=true;
+    
   }
   async function sendAction(scope,command,target,ids) {
     const payload={type:'order',scope,command,target,ids};
@@ -474,20 +474,26 @@
     roomHost.hidden=!war;
     owner.hidden=!war||!order;
     panel.hidden=!war;
-    if(!war){flash.hidden=true;attackAlert.hidden=true;}
+    if(!war)flash.hidden=true;
+    const hasContent=[flash,attackAlert,guard,watcherNode].some(n=>n&&!n.hidden)||!!extras?.children.length;
+    if(!hasContent){flowHost.hidden=true;flowHost.style.setProperty('display','none','important');return;}
     const row=visibleIconRow();
-    // Insert a sibling in normal flow, not a child of a flex icon tray.
     let anchor=row;
-    if(anchor){while(anchor.parentElement && anchor.parentElement!==document.body && /^(flex|inline-flex|grid|inline-grid)$/.test(getComputedStyle(anchor.parentElement).display)){const p=anchor.parentElement;const r=p.getBoundingClientRect();if(r.height>160){anchor=null;break;}anchor=p;}}
-    if(anchor?.parentElement && !flowHost.contains(anchor) && !roomHost.contains(anchor)){
+    // Escape fixed-height header wrappers and insert in the normal page flow.
+    if(anchor){for(let p=anchor.parentElement;p&&p!==document.body;p=p.parentElement){
+      const css=getComputedStyle(p),r=p.getBoundingClientRect();
+      if(r.height>360)break;
+      if(/^(fixed|absolute|sticky)$/.test(css.position)||/hidden|clip/.test(css.overflowY)||/flex|grid/.test(css.display)||p.clientHeight<p.scrollHeight-2)anchor=p;
+    }}
+    const main=document.querySelector('#mainContainer,main,.content-wrapper');
+    if(anchor?.parentElement && !flowHost.contains(anchor) && !roomHost.contains(anchor) && !/^(fixed|absolute)$/.test(getComputedStyle(anchor.parentElement).position)){
       if(anchor.nextElementSibling!==flowHost)anchor.after(flowHost);
-    }else if(!flowHost.isConnected){
-      const combat=document.querySelector('[class*="dialogButtons___"]')||document.querySelector('[class*="appHeaderWrapper___"]');
-      const main=document.querySelector('#mainContainer,main,.content-wrapper');
-      if(combat && !/^(flex|inline-flex|grid|inline-grid)$/.test(getComputedStyle(combat.parentElement).display))combat.after(flowHost);else if(main && !/^(flex|inline-flex|grid|inline-grid)$/.test(getComputedStyle(main).display))main.prepend(flowHost);
+    }else if(main && !flowHost.contains(main) && !/^(fixed|absolute)$/.test(getComputedStyle(main).position)){
+      if(main.firstElementChild!==flowHost)main.prepend(flowHost);
     }
-    // A missing safe anchor must never result in a viewport-covering fallback.
     flowHost.hidden=!flowHost.isConnected;
+    flowHost.style.setProperty('display',flowHost.hidden?'none':'block','important');
+
   }
 
   function renderOps() {
@@ -509,8 +515,10 @@
     let watcher=watcherNode;if(!watcher){watcher=watcherNode=element('div','watchers');flowRoot.append(watcher);}
     const slots=ops.watchSlots||{primary:ops.watchers?.[0],secondary:ops.watchers?.[1]};
     const watchSig=JSON.stringify([slots,ops.watcherEnergy,ops.claim,me?.name]);
+    const unavailable=Object.values(slots).filter(Boolean).some(name=>{const m=(ops.watcherEnergy||[]).find(v=>v.name===name);return !m?.online || !Number.isFinite(m.energy) || m.energy<25;});
+    watcher.classList.toggle('watchWarning',unavailable);
     watcher.hidden=!slots.primary&&!slots.secondary;
-    if(watcherSignature!==watchSig||!watcher.firstChild){watcherSignature=watchSig;const heading=element('div','watchTitle');const grid=element('div','watchGrid');for(const [role,name] of Object.entries(slots)){if(!name)continue;const m=(ops.watcherEnergy||[]).find(v=>v.name===name);const card=element('div','watchMember');card.append(element('span','watchName',(role==='primary'?'P':'S')+' · '+name),element('span','watchEnergy','⚡'+(m?.energy??'?')+'/'+(m?.maxEnergy??'?')));if(ops.claim?.name===name)card.append(element('span','claimed','NEXT'));if(name===me?.name){const b=element('button','claim',ops.claim?.name===name?'Release':'Next hit');b.disabled=!!ops.claim&&ops.claim.name!==name;b.onclick=()=>sendAction('claim',ops.claim?.name===name?'Release next hit':'Claim next hit');card.append(b);}grid.append(card);}watcher.replaceChildren(heading,grid);}
+    if(watcherSignature!==watchSig||!watcher.firstChild){watcherSignature=watchSig;const heading=element('div','watchTitle');const grid=element('div','watchGrid');for(const [role,name] of Object.entries(slots)){if(!name)continue;const m=(ops.watcherEnergy||[]).find(v=>v.name===name);const card=element('div','watchMember');card.classList.toggle('watchUnavailable',!m?.online||!Number.isFinite(m.energy)||m.energy<25);card.title=!m?.online?'Offline':!Number.isFinite(m.energy)?'Energy unknown':m.energy<25?'Insufficient energy':'Ready';card.append(element('span','watchName',(role==='primary'?'P':'S')+' · '+name),element('span','watchEnergy','⚡'+(m?.energy??'?')+'/'+(m?.maxEnergy??'?')));if(!m?.online)card.append(element('span','watchProblem','OFFLINE'));else if(!Number.isFinite(m.energy)||m.energy<25)card.append(element('span','watchProblem',Number.isFinite(m.energy)?'LOW E':'UNKNOWN E'));if(ops.claim?.name===name)card.append(element('span','claimed','NEXT'));if(name===me?.name){const b=element('button','claim',ops.claim?.name===name?'Release':'Next hit');b.disabled=!!ops.claim&&ops.claim.name!==name;b.onclick=()=>sendAction('claim',ops.claim?.name===name?'Release next hit':'Claim next hit');card.append(b);}grid.append(card);}watcher.replaceChildren(heading,grid);}
     watcher.firstChild.textContent=watchers;
     placePersonal(personal);
     if(isWarView() && personal && !personal.cleared && personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=personal.text;}else extras.querySelector('.personalFallback')?.remove();
@@ -518,6 +526,7 @@
     if(roomTabs){const selected=roomTabs.querySelector('.selected')?.dataset.tab;assignments.hidden=!me?.leader||selected!=='Orders';opsBox.hidden=selected!=='Energy';leaders.hidden=!me?.leader||selected!=='Orders';for(const label of ['Orders','Watch']){const b=roomTabs.querySelector('[data-tab="'+label+'"]');if(b)b.hidden=!me?.leader||(label==='Watch'&&!ops.warActive);}}
     watchSection.hidden=!me?.leader || !ops.warActive || (roomTabs && roomTabs.querySelector('.selected')?.dataset.tab!=='Watch');
     if(guard){const id=new URLSearchParams(location.search).get('user2ID');const inside=order?.text==='INSIDE HITS ONLY'||(ops.instructions||[]).some(x=>x.startsWith('INSIDE HITS ONLY'));guard.hidden=!(currentPage()==='Attack' && inside && ops.warActive && ops.enemyRosterFresh && id && !(ops.enemyIds||[]).includes(id));}
+    positionFlow();
     if(!panel.open)return;
     if(me?.leader){
     options(recipient,(['Assign watcher','Remove watcher','Clear personal order'].includes(memberCommand.value)?ops.members||[]:ops.available||[]).map(n=>[n,n]));
@@ -538,13 +547,14 @@
     if(sig===opsKey)return;opsKey=sig;
     const readings=opsBox.lastChild;
     const delta=t=>elapsed(now-Math.max(0,t-now));
-    readings.replaceChildren(element('p','','Reported total: '+sum(fresh)+'E · readings older than 1:30 excluded'));
-    for(const m of members.filter(m=>m.at && m.online).sort((a,b)=>b.energy-a.energy)){
-      readings.append(element('div','reading',m.name+' · ⚡'+m.energy+'/'+(m.maxEnergy??'?')+' · ❤️'+(m.life??'?')+(m.maxLife?'/'+m.maxLife:'')+' · '+m.status+
-        ' · booster '+(m.boosterUntil==null?'unknown':m.boosterUntil<=now?'ready':delta(m.boosterUntil))+
-        (m.landAt?' · '+m.destination+' ETA '+new Date(m.landAt).toLocaleTimeString():m.destination?' · '+m.destination:'')+
-        ' · seen '+elapsed(m.at)+' ago'));
+    const totals=element('div','energyTotals');for(const [name,value] of [['Online E',sum(fresh.filter(m=>m.online))],['Ready E',sum(ready)],['Fresh',fresh.filter(m=>m.online).length+'/'+members.filter(m=>m.online).length]]){const cell=element('div','energyTotal');cell.append(element('small','',name),element('b','',String(value)));totals.append(cell);}
+    const table=element('div','energyTable');const header=element('div','energyRow energyHead');for(const name of ['Member','⚡ Energy','♥ HP','Booster'])header.append(element('span','',name));table.append(header);
+    for(const m of members.filter(m=>m.online).sort((a,b)=>(b.energy??-1)-(a.energy??-1))){
+      const stale=!m.at||now-m.at>90000;const row=element('div','energyRow');const person=element('div','energyPerson');person.append(element('b','',m.name),element('small','',stale?'No fresh data':m.status||'Unknown'));row.append(person,element('span','',stale?'—':m.energy+'/'+(m.maxEnergy??'?')),element('span','',stale?'—':String(m.life??'?')),element('span','',stale||m.boosterUntil==null?'—':m.boosterUntil<=now?'Ready':delta(m.boosterUntil)));table.append(row);
+      if(!stale&&m.destination&&m.destination!=='Torn')table.append(element('div','energyTravel','↳ '+m.destination+(m.landAt?' · '+new Date(m.landAt).toLocaleTimeString():'')));
     }
+    readings.replaceChildren(totals,table);
+
   }
   function mount() {
     const host = document.createElement('div');
@@ -586,6 +596,10 @@
       .roomNav{display:flex;gap:3px;padding:6px;background:#171e22}.roomNav button{flex:1;min-width:0;padding:6px 2px;font-size:11px;border-color:#43535c}.roomNav button.selected{background:#45616a;color:#fff}.roomContent{padding:6px;min-height:54px}.roomContent .headcount,.roomContent .assignments{margin:0;border:0;background:transparent}.roomContent .headcount>summary,.roomContent .assignments>summary{display:none}.roomContent .roster,.roomContent .feed,.roomContent .controls{margin:3px}.watchers{border:1px solid #50616a;border-radius:5px;margin:4px 0;padding:6px!important}.watchTitle{font-weight:700}.watchMember{padding:3px 0}.roomContent .controls{display:flex;flex-direction:column;align-items:stretch;padding:10px;border:1px solid #43535c;border-radius:5px;background:#252f35;margin:0 0 9px}.roomContent .controls h4,.orderGroup h4,.activeOrders h4,.assignments h4{color:#d5e0e5;font-size:12px;letter-spacing:.035em;margin:0 0 7px}.roomContent .assignments{padding:10px;border:1px solid #43535c;border-radius:5px;background:#252f35}.assignments select,.assignments button{max-width:100%;margin:3px 0}.assignments>select{width:100%}.orderGroup,.activeOrders{border-top:1px solid #43535c;margin-top:12px;padding-top:10px}.orderGroup label{display:block;font-size:11px;color:#b8c8ce}.orderGroup select{display:block;width:100%}.orderLine{display:flex;align-items:center;justify-content:space-between;gap:5px;padding:6px 0;border-bottom:1px solid #39464d}.orderLine span{display:block;font-size:11px;color:#e8c780}.watchGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:6px}.watchMember{display:flex;flex-direction:column;gap:3px;background:#182329;border:1px solid #40535e;border-radius:4px;padding:6px!important;overflow-wrap:anywhere}.watchMember small{color:#a9bbc6;font-size:9px;letter-spacing:.06em}.watchMember .claim{margin:2px 0 0;width:100%;pointer-events:auto}.claimed{color:#91d18b;font-size:10px;font-weight:700}.hpgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.hpbar{height:5px;background:#a74040;border-radius:3px;overflow:hidden}.hpfill{height:100%;background:#77c75a}.hplabel{font-size:11px;overflow-wrap:anywhere}.claim{pointer-events:auto;margin-left:5px;font-size:11px;padding:3px}.watchers{font-size:11px}.personalHeader{z-index:2147483647;color:#ffe194;background:#252525;display:flex;align-items:center;justify-content:center;text-align:center;line-height:1;overflow:hidden;pointer-events:none}.tabrow{display:flex;gap:4px;padding:4px}.tabrow button{flex:1;font-size:12px;padding:4px}.people{grid-template-columns:1fr!important}.people li{padding:2px 5px!important}.member{background:transparent;border:0;color:inherit;padding:2px}.headcount,.assignments,.share{margin:7px}.assignments select,.assignments button{margin:3px;max-width:96%}
     `;
     style.textContent+=`\n.watchers{margin:2px 0;padding:3px 5px!important;border-radius:3px;font-size:11px}.watchTitle{font-size:11px;line-height:15px}.watchGrid{gap:4px;margin-top:2px}.watchMember{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:3px 5px;padding:3px!important;min-width:0}.watchName{font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}.watchEnergy{white-space:nowrap;color:#d0dce0}.watchMember .claim{width:auto;margin:0;padding:2px 5px;line-height:14px;font-size:10px}.signal{padding:3px 6px;font-size:11px}.flash{position:static!important;padding:4px 6px;background:#5d4b28;color:#fff;text-shadow:none}.flash .command{font-size:12px;margin:1px 0}.flash small{font-size:9px}.fightAlert{position:static!important;padding:4px 6px}.banner{padding:5px 8px}.banner .command{font-size:15px}.banner small{font-size:9px}.issued{font-size:10px}.personalHeader{white-space:nowrap;background:transparent;text-overflow:ellipsis}`;
+    style.textContent+=`
+    .watchWarning{border-color:#e06868!important;animation:fwPulse 1.8s ease-in-out infinite}.watchUnavailable{border-color:#a95757}.watchProblem{font-size:9px;color:#ff9b9b;font-weight:700}@keyframes fwPulse{50%{box-shadow:inset 0 0 9px #c54a4a99}}@media(prefers-reduced-motion:reduce){.watchWarning{animation:none;box-shadow:inset 0 0 5px #c54a4a}}
+    .energyTotals{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:6px}.energyTotal{padding:6px;background:#26363d;border-radius:4px;display:flex;flex-direction:column;text-align:center}.energyTotal small{font-size:10px;color:#b5c6cc}.energyTotal b{font-size:16px;color:#d5eadb}.energyRow{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,.8fr) minmax(0,.9fr);gap:4px;align-items:center;border-bottom:1px solid #39464d;padding:6px 3px;font-size:11px;font-variant-numeric:tabular-nums}.energyRow>span{text-align:right;overflow-wrap:anywhere}.energyHead{font-size:10px;color:#aebfc6}.energyPerson{min-width:0;overflow-wrap:anywhere}.energyPerson small{display:block;font-size:10px;color:#a8b9bf}.energyTravel{font-size:10px;padding:2px 4px;color:#a8b9bf}
+    `;
     panel = document.createElement('details');
     title = document.createElement('summary');
     panel.open=true;
@@ -652,8 +666,8 @@
     extras=element('div','signals');
     buildOps();
     guard=element('aside','banner','CHAIN BONUS WARNING · Outside target. Return to the faction war and select an enemy.');guard.hidden=true;guard.setAttribute('role','alert');
-    roomTabs=element('div','roomTabs');const pages=[['Online',presence],['Energy',opsBox],['Orders',leaders,assignments],['Fights',output],['Watch',watchSection]];const bar=element('div','roomNav');const content=element('div','roomContent');let active='Online';function choose(name){active=name;for(const [label,...nodes] of pages){for(const n of nodes)n.hidden=label!==name;const b=bar.querySelector('[data-tab="'+label+'"]');if(b)b.classList.toggle('selected',label===name);}if(name==='Energy')opsBox.open=true;if(name==='Orders')assignments.open=true;if(name==='Watch')watchSection.open=true;render();}for(const [label,...nodes] of pages){const b=element('button','',label);b.dataset.tab=label;b.onclick=()=>choose(label);bar.append(b);for(const n of nodes)content.append(n);}roomTabs.append(bar,content);panel.insertBefore(roomTabs,news);onlineTab.remove();globalTab.remove();
-    personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);root.append(style,owner,panel);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;box-sizing:border-box;clear:both';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
+    roomTabs=element('div','roomTabs');const pages=[['Online',presence],['Energy',opsBox],['Orders',leaders,assignments],['Watch',watchSection]];const bar=element('div','roomNav');const content=element('div','roomContent');let active='Online';function choose(name){active=name;for(const [label,...nodes] of pages){for(const n of nodes)n.hidden=label!==name;const b=bar.querySelector('[data-tab="'+label+'"]');if(b)b.classList.toggle('selected',label===name);}if(name==='Energy')opsBox.open=true;if(name==='Orders')assignments.open=true;if(name==='Watch')watchSection.open=true;render();}for(const [label,...nodes] of pages){const b=element('button','',label);b.dataset.tab=label;b.onclick=()=>choose(label);bar.append(b);for(const n of nodes)content.append(n);}roomTabs.append(bar,content);panel.insertBefore(roomTabs,news);onlineTab.remove();globalTab.remove();output.remove();
+    personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);root.append(style,owner,panel);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;min-height:0;height:auto;flex:none;box-sizing:border-box;clear:both;overflow:visible';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
     if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.hidden=true;}choose('Online');positionFlow();
     let scheduled=false;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;positionFlow();});});observer.observe(document.body,{childList:true,subtree:true});window.addEventListener('hashchange',()=>{positionFlow();renderOps();});
     window.addEventListener('resize',()=>{headerRect=null;placePersonal(ops.personal);});
