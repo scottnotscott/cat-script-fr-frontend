@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.5.0
+// @version      0.6.0
 // @match        https://www.torn.com/factions.php*
 // @run-at       document-start
 // @grant        none
@@ -26,14 +26,68 @@
     me = data.me; order = data.order; online = data.online || []; rosterAt = data.rosterAt || 0;
     feed = data.attacks || [];
   }
+  function elapsed(stamp) {
+    const seconds = Math.max(0, Math.floor((Date.now()-stamp)/1000));
+    if (seconds < 60) return seconds+'s';
+    const pad = n => String(n).padStart(2,'0');
+    const mins = Math.floor(seconds/60);
+    return (mins>=60 ? Math.floor(mins/60)+':'+pad(mins%60) : mins)+':'+pad(seconds%60);
+  }
+  function element(tag,cls,text) {
+    const node=document.createElement(tag);
+    node.className=cls;
+    if (text!=null) node.textContent=text;
+    return node;
+  }
+  function clock(at) {
+    const t=element('time','age');
+    if (at) {t.dataset.stamp=at;t.textContent=elapsed(at)+' ago';}
+    return t;
+  }
+  let lastOrder='', lastRoster='', lastFeed='', flash, flashTimer;
   function render() {
     if (!title) return;
-    title.textContent = (me ? me.name + ' · ' + me.role : 'War relay') + ' · ' + status + (order && !panel.open ? ' · ' + order.text : '');
+    title.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status);
+    title.title=status;
+    const signature=JSON.stringify(order || null);
+    if (signature!==lastOrder) {
+      lastOrder=signature;
+      owner.hidden=!order;
+      clearTimeout(flashTimer);
+      flash.hidden=true;
+      if (order) {
+        const command=element('b','command',order.text);
+        const who=element('div','issued','Issued by '+order.by+' · ');
+        who.append(clock(order.at));
+        owner.replaceChildren(element('small','','ACTIVE WAR ORDER'),command,who);
+        if (Date.now()-order.at<30000) {
+          flash.replaceChildren(element('small','','NEW WAR ORDER'),command.cloneNode(true),element('span','',order.by));
+          flash.hidden=false;
+          flashTimer=setTimeout(()=>{flash.hidden=true;},10000);
+        }
+      } else owner.replaceChildren();
+    }
     if (!panel.open) return;
-    leaders.hidden = !me?.leader;
-    owner.textContent = order ? order.text + ' — ' + order.by : '';
-    presence.textContent = !rosterAt ? 'Waiting for faction roster' : 'Online (' + online.length + '): ' + (online.join(', ') || 'none') + ' · updated ' + Math.max(0,Math.floor((Date.now()-rosterAt)/1000)) + 's ago';
-    output.textContent = feed.length ? feed.map(r => (r.live ? 'In progress' : r.finished ? 'Finished' : 'Observed') + ' · ' + (r.attacker || '?') + ' → ' + (r.defender || '?') + (r.at ? ' · ' + (r.observed ? 'seen ' : '') + Math.max(0,Math.floor((Date.now()-r.at)/1000)) + 's ago' : '')).join('\n') : 'Waiting for chain observations';
+    leaders.hidden=!me?.leader;
+    const rosterKey=JSON.stringify([online,rosterAt]);
+    if (rosterKey!==lastRoster) {
+      lastRoster=rosterKey;
+      const grid=element('ul','people');
+      for (const name of [...online].sort((a,b)=>a.localeCompare(b))) grid.append(element('li','',name));
+      presence.replaceChildren(element('h4','','Online now · '+online.length),grid,clock(rosterAt));
+    }
+    const feedKey=JSON.stringify(feed);
+    if (feedKey!==lastFeed) {
+      lastFeed=feedKey;
+      const items=feed.map(r=>{
+        const item=element('article','fight');
+        item.append(element('b',r.live?'live':'result',r.live?'LIVE FIGHT':r.result || (r.finished?'Outcome unavailable':'Observed')),clock(r.at));
+        const fighter=(name,life)=> (name && name!=='0'?name:'Unknown') + (r.live && life!=null?' (life '+life+')':'');
+        item.append(element('div','fighters',fighter(r.attacker,r.attackerLife)+' → '+fighter(r.defender,r.defenderLife)));
+        return item;
+      });
+      output.replaceChildren(element('h4','','Chain activity'),...(items.length?items:[element('p','','Waiting for chain observations')]));
+    }
   }
   function flush() {
     if (!authenticated || socket.readyState !== 1 || !pending.size) return;
@@ -156,7 +210,12 @@
         if (!raw || !/^[\w-]{1,70}$/.test(String(raw))) continue;
         const id = (live ? 'live-' : '') + raw;
         const time = Number(r.finishTimestamp ?? r.timestamp_ended);
-        pending.set(id,{id,pair,live,finished:!live,at:time > 1e12 ? time : time*1000,attacker:label(aid,r.attackerName ?? r.attacker),defender:label(did,r.defenderName ?? r.defender)});
+        const life = id => {
+          const raw = users[id]?.life;
+          const n = raw?.current ?? raw;
+          return (typeof n === 'number' || typeof n === 'string' && /^\d+$/.test(n)) && Number.isSafeInteger(Number(n)) && Number(n)>=0 ? Number(n) : null;
+        };
+        pending.set(id,{id,result:typeof r.result === 'string' ? r.result : '',attackerLife:live ? life(aid) : null,defenderLife:live ? life(did) : null,pair,live,finished:!live,at:time > 1e12 ? time : time*1000,attacker:label(aid,r.attackerName ?? r.attacker),defender:label(did,r.defenderName ?? r.defender)});
         if (pending.size > 100) pending.delete(pending.keys().next().value);
       }
     }
@@ -193,31 +252,56 @@
     target.value = names.has(selected) ? selected : 'Nutbaws';
     target.dataset.names = JSON.stringify(list);
   }
-  function newsButton(button) {
-    let hidden = false;
-    try { hidden = localStorage.getItem('fw.hideNews') === '1'; } catch {}
-    const style = document.createElement('style');
-    style.textContent = '[data-fw-hide-news]{display:none!important}';
-    document.head.append(style);
-    let section;
-    function apply() {
-      if (!section?.isConnected) {
-        const headings = document.querySelectorAll('h2,h3,h4,[role="heading"],.title-black,.title-gray,[class*="title___"]');
-        const head = [...headings].find(el=>el.textContent.trim().toLowerCase()==='main news');
-        section = head?.closest('.faction-news,.news-wrap,[class*="newsWrap"],[class*="newsContainer"],section,.sortable-box');
-        if (!section && head?.parentElement?.children.length > 1 && head.parentElement.textContent.length > head.textContent.length && !head.parentElement.querySelector('.f-war-list,#faction_war_list_id')) section = head.parentElement;
+  function layout(host,button) {
+    const hideClass='fw-news-hidden';
+    const css=element('style','');
+    css.textContent='.'+hideClass+'{display:none!important}';
+    document.head.append(css);
+    let hidden=false,section,anchor,timer;
+    try {hidden=localStorage.getItem('fw.hideNews')==='1';} catch {}
+    function locate() {
+      const scope=document.querySelector('#faction-main,.content-wrapper,#mainContainer,main') || document.body;
+      const walker=document.createTreeWalker(scope,NodeFilter.SHOW_TEXT);
+      const news=[];
+      let announcement;
+      for(let node; (node=walker.nextNode());) {
+        const text=node.nodeValue.trim().toLowerCase();
+        if(text==='main news') news.push(node.parentElement);
+        if(text==='faction announcement') announcement=node.parentElement;
       }
-      section?.toggleAttribute('data-fw-hide-news',hidden);
-      button.textContent = hidden ? 'Show main news' : 'Hide main news';
+      const first=news[0];
+      section=scope.querySelector('#faction-news,#faction-main-news,[data-section="main-news"],.faction-news') || null;
+      if(!section && first) {
+        // The outer title and inner filter have identical labels. Find their
+        // common container and include the list beneath the filter.
+        const last=news[news.length-1];
+        let candidate=first;
+        while(candidate && candidate!==scope && candidate!==document.body && !candidate.contains(announcement || host)) {
+          const hasList=candidate.querySelector('ul,ol,table,[class*="news-list"],[class*="newsList"],[class*="news-row"]');
+          if(candidate.contains(last) && (hasList || candidate.textContent.trim().length>110)) {section=candidate;break;}
+          candidate=candidate.parentElement;
+        }
+      }
+      if(section && (section.contains(announcement || host) || section===scope || section===document.body)) section=null;
+      // Insert at the section boundary, outside anything the toggle hides.
+      anchor=section || announcement?.closest('.sortable-box,section,[class*="announcement-wrap"]') || scope.querySelector('#faction_war_list_id,.f-war-list');
+      if(anchor && anchor!==host && !host.contains(anchor)) {
+        if(host.nextElementSibling!==anchor) anchor.before(host);
+      } else if(!host.isConnected) scope.prepend(host);
+      section?.classList.toggle(hideClass,hidden);
+      button.textContent=section ? (hidden?'Show main news':'Hide main news') : 'Main news unavailable';
+      button.disabled=!section;
     }
-    button.onclick = () => {hidden=!hidden; try {localStorage.setItem('fw.hideNews',hidden?'1':'0');} catch {} apply();};
-    apply();
-    let timer;
-    new MutationObserver(() => {if (!section?.isConnected && !timer) timer=setTimeout(()=>{timer=null;apply();},1000);}).observe(document.body,{childList:true,subtree:true});
+    button.onclick=()=>{hidden=!hidden;try{localStorage.setItem('fw.hideNews',hidden?'1':'0');}catch{}locate();};
+    locate();
+    new MutationObserver(()=>{
+      if(host.isConnected && section?.isConnected && anchor?.isConnected) return;
+      if(!timer) timer=setTimeout(()=>{timer=null;locate();},700);
+    }).observe(document.body,{childList:true,subtree:true});
   }
   function mount() {
     const host = document.createElement('div');
-    host.style.cssText = 'all:initial;position:fixed;bottom:12px;left:8px;z-index:99999';
+    host.style.cssText='display:block;position:relative;width:100%;min-width:0;box-sizing:border-box;margin:8px 0;clear:both';
     const root = host.attachShadow({mode:'closed'});
     const style = document.createElement('style');
     style.textContent = `
@@ -229,12 +313,32 @@
       input::placeholder { color:#c6d0d2 }
       form { display:flex; gap:4px; flex-wrap:wrap }
     `;
+    style.textContent += `
+      :host{font:14px/1.4 system-ui;color:#f4f6f7} *{box-sizing:border-box}
+      details{max-width:none;border-radius:4px;background:#20262a;padding:0}
+      summary{padding:11px 12px;font-weight:650;background:#333a3e}
+      .banner,.flash{background:#ffd46a;color:#211900;border-left:6px solid #ef9128;padding:10px 13px;line-height:1.25}
+      .banner small,.flash small{display:block;font-size:10px;letter-spacing:.12em;font-weight:800}
+      .command{display:block;font-size:clamp(20px,5vw,30px);margin:4px 0;overflow-wrap:anywhere}
+      .issued,.issued .age{font-size:12px;color:#423111}
+      .flash{position:fixed;z-index:2147483646;top:env(safe-area-inset-top,0);left:0;right:0;pointer-events:none;box-shadow:0 3px 15px #0007}
+      h4{margin:0 0 6px;font-size:13px}.roster,.feed,.controls{margin:10px 12px}
+      .people{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:4px}
+      .people li{padding:4px 6px;background:#30393e;border-radius:3px;overflow-wrap:anywhere}
+      .people li:before{content:'●';color:#87d6a2;margin-right:6px}
+      .feed{max-height:32vh;overflow:auto}.fight{border-top:1px solid #465057;padding:7px 0;display:grid;grid-template-columns:1fr auto;gap:2px 8px}
+      .age{font:12px system-ui;color:#becbd3;font-variant-numeric:tabular-nums}
+      .fighters{grid-column:1/-1;overflow-wrap:anywhere}.live{color:#ffcd65}.result{color:#d7e9f0}
+      .controls{display:flex;gap:5px;flex-wrap:wrap}button.news{margin:0 12px 10px}
+    `;
     panel = document.createElement('details');
     title = document.createElement('summary');
-    output = document.createElement('pre');
-    owner = document.createElement('strong');
-    presence = document.createElement('p');
-    leaders = document.createElement('div');
+    panel.open=true;
+    output=element('section','feed');
+    owner=element('aside','banner'); owner.hidden=true; owner.setAttribute('aria-live','polite');
+    flash=element('aside','flash');flash.hidden=true;flash.setAttribute('role','alert');
+    presence=element('section','roster');
+    leaders=element('div','controls');
     leaders.hidden = true;
     directive = document.createElement('select');
     directive.setAttribute('aria-label','War direction');
@@ -261,10 +365,10 @@
     };
     leaders.append(directive,target,send,notice);
     const news = document.createElement('button');
-    newsButton(news);
+    news.className='news';
     fillTargets();
     panel.ontoggle = () => {if(panel.open) fillTargets(); render();};
-    panel.append(title,owner,presence,leaders,output,news);
+    panel.append(title,presence,leaders,output,news);
     if (!key) {
       const form = document.createElement('form');
       const input = document.createElement('input');
@@ -287,8 +391,9 @@
         connect();
       };
     }
-    root.append(style,panel);
-    document.body.append(host);
+    root.append(style,owner,panel,flash);
+    layout(host,news);
+    setInterval(()=>{if(document.hidden)return;for(const time of root.querySelectorAll('time[data-stamp]')) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
   }
   connect();
