@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.1.0
+// @version      0.2.0
 // @match        https://www.torn.com/factions.php*
 // @run-at       document-start
 // @grant        none
@@ -14,12 +14,18 @@
   window.__fwRelay = true;
   let socket, authenticated = false, status = 'Setup required', feed = [], panel, output, title;
   const pending = new Map();
+  const pdaKey = '###PDA-APIKEY###';
+  let key = /^[a-zA-Z0-9]{16}$/.test(pdaKey) ? pdaKey : '';
   let config;
-  try { config = JSON.parse(sessionStorage.getItem('fwRelay') || 'null'); } catch {}
+  let retry;
+  try {
+    const url = localStorage.getItem('fwRelayApprovedUrl');
+    if (url && new URL(url).protocol === 'wss:') config = {url};
+  } catch {}
   function render() {
     if (!title) return;
-    title.textContent = 'War relay � ' + status;
-    output.textContent = feed.length ? feed.map(r => (r.finished ? 'Finished' : 'Observed') + ' � ' + (r.attacker || '?') + '  ' + (r.defender || '?') + '  #' + r.id).join('\n') : 'Waiting for chain observations';
+    title.textContent = 'War relay · ' + status;
+    output.textContent = feed.length ? feed.map(r => (r.finished ? 'Finished' : 'Observed') + ' · ' + (r.attacker || '?') + ' → ' + (r.defender || '?') + '  #' + r.id).join('\n') : 'Waiting for chain observations';
   }
   function flush() {
     if (!authenticated || socket.readyState !== 1 || !pending.size) return;
@@ -27,11 +33,12 @@
     pending.clear();
   }
   function connect() {
-    if (!config) return;
+    clearTimeout(retry);
+    if (!config || !key) return;
     status = 'Connecting';
     render();
     try { socket = new WebSocket(config.url); } catch { status = 'WebSocket blocked'; render(); return; }
-    socket.onopen = () => socket.send(JSON.stringify({type:'auth', token:config.token}));
+    socket.onopen = () => socket.send(JSON.stringify({type:'auth', key}));
     socket.onmessage = e => {
       let data;
       try { data = JSON.parse(e.data); } catch { return; }
@@ -44,9 +51,9 @@
     };
     socket.onclose = e => {
       authenticated = false;
-      status = e.code === 1008 ? 'Access refused' : 'Disconnected';
+      status = e.code === 1008 ? (e.reason || 'Access refused') : 'Disconnected';
       render();
-      if (e.code !== 1008) setTimeout(connect,10000);
+      if (e.code !== 1008) retry = setTimeout(connect,10000);
     };
   }
   function observe(data) {
@@ -90,10 +97,12 @@
       const url = prompt('Your faction relay (wss://host/relay)',config?.url || '');
       if (!url) return;
       try { if (new URL(url).protocol !== 'wss:') throw Error(); } catch { alert('Enter a secure wss:// address'); return; }
-      const token = prompt('Your individual relay token');
-      if (!token) return;
-      config = {url,token:token.trim()};
-      try {sessionStorage.setItem('fwRelay',JSON.stringify(config));} catch {}
+      const enteredKey = /^[a-zA-Z0-9]{16}$/.test(pdaKey) ? pdaKey : prompt('Torn public-access API key for this relay');
+      if (!enteredKey || !/^[a-zA-Z0-9]{16}$/.test(enteredKey.trim())) return;
+      if (!confirm('Send your Torn API key to ' + new URL(url).host + ' to verify faction membership?')) return;
+      key = enteredKey.trim();
+      config = {url};
+      try {localStorage.setItem('fwRelayApprovedUrl',url);} catch {}
       if (socket) {socket.onclose=null; socket.close();}
       authenticated=false;
       connect();
