@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.7
+// @version      0.9.8
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
@@ -23,9 +23,10 @@
   let retry;
   let revision, me, order, rosterAt = 0, online = [], leaders, target, directive, presence, owner, notice;
   const candidates = new Map();
-  const commands = ['EVERYONE TURTLE','EVERYONE ATTACK','DRAG CHAIN OUT','AIM->1k CHAIN','INSIDE HITS ONLY','Clear order','BUILD CHAIN','CHAIN DENIAL - HOSP ONLINERS'];
+  const commands = ['EVERYONE TURTLE','EVERYONE ATTACK','EVERYONE PILE ON','DRAG CHAIN OUT','AIM->1k CHAIN','INSIDE HITS ONLY','Clear order','BUILD CHAIN','CHAIN DENIAL - HOSP ONLINERS'];
   let ops={}, nextIntel=0, chainObservation=null, opsBox, assignments, recipient, memberCommand, watchList, extras, attackAlert, shareButton;
   let previousFights=null, fightUntil=0, selectedFight=null, previousSignal=null;
+  const dismissedFights=new Map();
 
   const endpoint = path => RELAY_BASE+path;
   async function refreshIntel(){
@@ -43,12 +44,16 @@
       data.attacks=[...entries.values()].sort((a,b)=>b.at-a.at);
     }
     const recent=data.attacks || [];
+    const now=Date.now();
     const signatures=new Map(recent.map(a=>[a.id,JSON.stringify([a.result,a.live,a.attackerLife,a.defenderLife,a.attackerMax,a.defenderMax,a.respect])]));
-    if(selectedFight?.live){const latest=recent.find(a=>a.id===selectedFight.id);if(latest){selectedFight=latest;if(Date.now()-(latest.sampleAt||latest.at)<15000)fightUntil=Date.now()+7500;}else fightUntil=0;}
-    if(!previousFights){selectedFight=recent.find(a=>a.live && Date.now()-(a.sampleAt||a.at)<15000);if(selectedFight)fightUntil=Date.now()+7500;}
-    if(previousFights){
-      const changed=recent.filter(a=>signatures.get(a.id)!==previousFights.get(a.id) && Date.now()-(a.sampleAt || a.at)<45000);
-      if(changed.length){selectedFight=changed.sort((a,b)=>(b.sampleAt||b.at)-(a.sampleAt||a.at))[0];fightUntil=Date.now()+7500;}
+    for(const [id,stamp] of dismissedFights)if(now-stamp>120000)dismissedFights.delete(id);
+    const live=recent.filter(a=>a.live&&now-(a.sampleAt||a.at)<25000&&!dismissedFights.has(a.id)).sort((a,b)=>(b.sampleAt||b.at)-(a.sampleAt||a.at));
+    // Live fights are independent of chain count, war state and watcher assignments.
+    if(live.length){selectedFight=live[0];fightUntil=(selectedFight.sampleAt||selectedFight.at)+25000;}
+    else if(previousFights){
+      const changed=recent.filter(a=>!a.live&&signatures.get(a.id)!==previousFights.get(a.id)&&now-(a.sampleAt||a.at)<15000);
+      if(changed.length){selectedFight=changed.sort((a,b)=>b.at-a.at)[0];fightUntil=now+5000;}
+      else if(selectedFight?.live)fightUntil=0;
     }
     previousFights=signatures;
     me = data.me; order = data.order; online = data.online || []; rosterAt = data.rosterAt || 0;
@@ -276,10 +281,10 @@
       }
       if (fresh.size) { candidates.clear(); for (const [id,name] of fresh) candidates.set(id,name); fillTargets(); }
     }
-    const desc = data?.warDesc ?? data;
-    const users = desc?.users ?? data?.users ?? {};
+    const desc = data?.warDesc ?? source?.warDesc ?? source ?? data;
+    const users = desc?.users ?? source?.users ?? data?.users ?? {};
     const label = (id,value) => String(users[id]?.playername ?? users[id]?.name ?? value?.name ?? value ?? id ?? '').slice(0,60);
-    for (const [live,rows] of [[true,desc?.currentAttacks ?? data?.currentAttacks],[false,desc?.recentAttacks ?? data?.recentAttacks]]) {
+    for (const [live,rows] of [[true,desc?.currentAttacks ?? source?.currentAttacks ?? data?.currentAttacks],[false,desc?.recentAttacks ?? source?.recentAttacks ?? data?.recentAttacks]]) {
       for (const r of Object.values(rows || {}).slice(-100)) {
         if (!r || typeof r !== 'object') continue;
         const aid = r.attackerID ?? r.attackerId ?? r.attacker_id, did = r.defenderID ?? r.defenderId ?? r.defender_id;
@@ -630,11 +635,11 @@
     target = document.createElement('select');
     target.setAttribute('aria-label','Pile-on target');
     target.hidden = true;
-    directive.onchange = () => {target.hidden=directive.value !== commands[1]; fillTargets();};
+    directive.onchange = () => {target.hidden=directive.value !== 'EVERYONE PILE ON'; fillTargets();};
     const send = document.createElement('button');
     send.textContent = 'Send order';
     notice = document.createElement('span');
-    send.onclick=async()=>{send.disabled=true;try{await sendAction('global',directive.value,target.value);}finally{send.disabled=false;}};
+    send.onclick=async()=>{send.disabled=true;try{await sendAction('global',directive.value,directive.value==='EVERYONE PILE ON'?target.value:'');}finally{send.disabled=false;}};
     leaders.append(element('h4','','Global orders'),directive,target,send,notice);
     const news = document.createElement('button');
     news.className='news';
@@ -665,7 +670,7 @@
         connect();
       };
     }
-    attackAlert=element('button','fightAlert');attackAlert.hidden=true;attackAlert.onclick=()=>{fightUntil=0;attackAlert.hidden=true;};
+    attackAlert=element('button','fightAlert');attackAlert.hidden=true;attackAlert.onclick=()=>{if(selectedFight?.live)dismissedFights.set(selectedFight.id,Date.now());fightUntil=0;attackAlert.hidden=true;positionFlow();};
     extras=element('div','signals');
     buildOps();
     guard=element('aside','banner','CHAIN BONUS WARNING · Outside target. Return to the faction war and select an enemy.');guard.hidden=true;guard.setAttribute('role','alert');
