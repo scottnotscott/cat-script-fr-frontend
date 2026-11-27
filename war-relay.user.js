@@ -704,7 +704,7 @@
       const form = loginForm=document.createElement('form');form.hidden=!!key;
       const input = document.createElement('input');
       input.type = 'password';
-      input.placeholder = 'Public-access Torn API key';
+      input.placeholder = 'Limited Torn API key';
       input.setAttribute('aria-label',input.placeholder);
       input.required = true;
       input.pattern = '[a-zA-Z0-9]{16}';
