@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.10
+// @version      0.9.11
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
@@ -37,7 +37,9 @@
     if(authenticated){socket.send(JSON.stringify({type:'intel',key}));return;}
     try { await postNative(endpoint('/intel'),'Bearer '+sessionToken,{}, {'X-Torn-Key':key}); } catch {}
   }
+  let sharedMembers=[], activityDialog, activityId, activityTab='Pages', activitySignature='', personalInline;
   function accept(data) {
+    if(Array.isArray(data.members))sharedMembers=data.members;
     ops=data.ops || {};
     if(Array.isArray(data.attackChanges)){
       const entries=new Map(feed.map(a=>[a.id,a]));
@@ -108,7 +110,10 @@
     flash.hidden=false;flash.classList.remove('anchored');flash.style.removeProperty('top');flashTimer=setTimeout(dismissFlash,10000);
   }
   function isWarView(){const q=new URLSearchParams(location.search);const h=location.hash;return location.pathname==='/factions.php'&&q.get('step')!=='rankreport'&&q.get('step')!=='profile'&&(!q.get('type')||q.get('type')==='1')&&!h.includes('tab=')&&!/^#\/war\/\d+$/.test(h)&&(!h||h==='#/'||h.startsWith('#/war'));}
-  function roomView(){const q=new URLSearchParams(location.search);return location.pathname==='/factions.php' && q.get('step')!=='rankreport' && q.get('step')!=='profile';}
+  function roomView(){return true;}
+  function presenceDot(state){const d=element('span','presenceDot '+(state||'offline'),'●');d.title=state||'offline';d.setAttribute('aria-label',state||'offline');return d;}
+  function openActivity(id,name){activityId=id??name;activityTab='Pages';activitySignature='';activityDialog.hidden=false;renderActivity();}
+  function renderActivity(){if(!activityDialog||activityDialog.hidden)return;const m=sharedMembers.find(v=>v.id===activityId||v.name===activityId);const signature=JSON.stringify([m,activityTab]);if(signature===activitySignature)return;activitySignature=signature;const heading=element('div','activityHeading');heading.append(element('b','',m?.name||String(activityId)));const close=element('button','','Close');close.onclick=()=>{activityDialog.hidden=true;};heading.append(close);const nav=element('div','roomNav');for(const tab of ['Pages','Sent','Received']){const btn=element('button',tab===activityTab?'selected':'',tab);btn.onclick=()=>{activityTab=tab;renderActivity();};nav.append(btn);}const body=element('div','activityBody');if(m){body.append(element('p','','Status: '+m.presence+' · '+(m.page||'Unknown page')));const rows=activityTab==='Pages'?m.visits:activityTab==='Sent'?m.sent:m.received;for(const r of rows||[]){const line=element('div','activityRow');line.append(element('b','',activityTab==='Pages'?r.page:(activityTab==='Sent'?r.defender:r.attacker)+' · '+outcome(r)),element('small','',new Date(r.at).toLocaleString()));body.append(line);}if(!rows?.length)body.append(element('p','','No recorded activity'));}else body.append(element('p','','Waiting for member data'));activityDialog.replaceChildren(heading,nav,body);}
   function render() {
     if (!title || !flowRoot) return;
     if(connectionNote){connectionNote.textContent=status;connectionNote.hidden=signedIn&&status==='Connected';}
@@ -134,17 +139,15 @@
     renderOps();
     if (!panel.open) return;
     leaders.hidden=!me?.leader || (roomTabs && roomTabs.querySelector('.selected')?.dataset.tab!=='Orders');
-    const rosterKey=JSON.stringify([online,rosterAt,me?.leader,ops.available,ops.views]);
+    renderActivity();
+    const rosterKey=JSON.stringify([sharedMembers.map(m=>[m.id,m.name,m.presence,m.page]),online]);
     if (rosterKey!==lastRoster) {
       lastRoster=rosterKey;
       const grid=element('ul','people');
-      for (const name of [...online].sort((a,b)=>a.localeCompare(b))) {
-        const cell=element('li','','');
-        if(me?.leader && (ops.available||[]).includes(name)){const b=element('button','member',name+' · '+((ops.views||[]).find(v=>v.name===name)?.page||'Other')+((ops.views||[]).find(v=>v.name===name)?.visible===false?' · background':''));b.onclick=()=>{roomTabs?.querySelector('[data-tab="Orders"]')?.click();recipient.value=name;assignments.open=true;assignments.scrollIntoView({block:'nearest'});};cell.append(b);}
-        else cell.textContent=name;
-        grid.append(cell);
+      for(const m of (sharedMembers.length?sharedMembers.filter(m=>m.presence!=='offline'):online.map(name=>({name,presence:'online'}))).sort((a,b)=>a.name.localeCompare(b.name))){
+        const cell=element('li','presenceMember');const btn=element('button','member');btn.append(presenceDot(m.presence),element('b','',m.name),element('span','memberPage',m.page||'Unknown page'));btn.onclick=()=>openActivity(m.id,m.name);cell.append(btn);grid.append(cell);
       }
-      presence.replaceChildren(element('h4','','Online now · '+online.length),grid,clock(rosterAt));
+      presence.replaceChildren(element('h4','','Connected · '+online.length),grid);
     }
     const feedKey=JSON.stringify(feed);
     if (feedKey!==lastFeed) {
@@ -480,7 +483,7 @@
   function placePersonal(personal){
     if(!personalHeader)return;
     const activePersonal=personal&&!personal.cleared?personal:null;
-    const shown=isWarView()?activePersonal:(order||activePersonal);
+    const shown=isWarView()?activePersonal:(activePersonal||order);
     personalHeader.hidden=true;if(!shown)return;
     const logo=document.querySelector('a[href="/"],a[href="/index.php"],#logo,.logo');
     const search=document.querySelector('[aria-label*="search" i],[title="Search"],button[class*="search"]');
@@ -488,7 +491,7 @@
     const a=logo?.getBoundingClientRect(),b=search?.getBoundingClientRect(),c=menu?.getBoundingClientRect();
     const left=Math.max(a?.right||0,c?.right||0)+4;
     if(!a||!b||a.top<0||a.bottom>innerHeight||a.top>120||Math.abs(a.top-b.top)>=40||b.left-left<25)return;
-    personalHeader.textContent=shown.text;personalHeader.title=shown.text;
+    personalHeader.textContent=shown.text;personalHeader.title=shown.text;personalHeader.classList.toggle('personalOrder',shown===activePersonal);
     personalHeader.style.cssText='position:fixed;left:'+left+'px;top:'+a.top+'px;width:'+(b.left-left-4)+'px;height:'+Math.max(16,a.height)+'px;font-size:'+Math.max(8,Math.min(13,(b.left-left-4)/(shown.text.length*.58)))+'px';
     personalHeader.hidden=false;
   }
@@ -540,11 +543,11 @@
     const watchers='🔗 '+(ops.chain?.count||0)+' · '+(ops.chain?.count?timer:'Inactive')+' · '+(ops.claim?ops.claim.name+' next':'Unclaimed');
     let watcher=watcherNode;if(!watcher){watcher=watcherNode=element('div','watchers');flowRoot.append(watcher);}
     const slots=ops.watchSlots||{primary:ops.watchers?.[0],secondary:ops.watchers?.[1]};
-    const watchSig=JSON.stringify([slots,ops.watcherEnergy,ops.claim,ops.canClaim,ops.backupOpen,me?.name]);
+    const watchSig=JSON.stringify([slots,ops.watcherEnergy,ops.claim,ops.canClaim,ops.backupOpen,me?.name,sharedMembers.filter(m=>Object.values(slots).includes(m.name)).map(m=>[m.name,m.page,m.presence])]);
     const unavailable=Object.values(slots).filter(Boolean).some(name=>{const m=(ops.watcherEnergy||[]).find(v=>v.name===name);return !m?.online || m.idle || !Number.isFinite(m.energy) || m.energy<25;});
     watcher.classList.toggle('watchWarning',unavailable);
     watcher.hidden=!slots.primary&&!slots.secondary&&!ops.claim;
-    if(watcherSignature!==watchSig||!watcher.firstChild){watcherSignature=watchSig;const heading=element('div','watchTitle');const grid=element('div','watchGrid');for(const [role,name] of Object.entries(slots)){if(!name)continue;const m=(ops.watcherEnergy||[]).find(v=>v.name===name);const card=element('div','watchMember');card.classList.toggle('watchUnavailable',!m?.online||m.idle||!Number.isFinite(m.energy)||m.energy<25);card.title=!m?.online?'Offline':m.idle?'Idle':!Number.isFinite(m.energy)?'Energy unknown':m.energy<25?'Insufficient energy':'Ready';card.append(element('span','watchName',(role==='primary'?'P':'S')+' · '+name),element('span','watchEnergy','⚡'+(m?.energy??'?')+'/'+(m?.maxEnergy??'?')));if(!m?.online)card.append(element('span','watchProblem','OFFLINE'));else if(m.idle)card.append(element('span','watchProblem','IDLE'));else if(!Number.isFinite(m.energy)||m.energy<25)card.append(element('span','watchProblem',Number.isFinite(m.energy)?'LOW E':'UNKNOWN E'));if(ops.claim?.name===name)card.append(element('span','claimed','NEXT'));if(name===me?.name){const b=element('button','claim',ops.claim?.name===name?'Release':'Next hit');b.disabled=ops.claim?.name!==name&&!ops.canClaim;b.onclick=()=>sendAction('claim',ops.claim?.name===name?'Release next hit':'Claim next hit');card.append(b);}grid.append(card);}watcher.replaceChildren(heading,grid);
+    if(watcherSignature!==watchSig||!watcher.firstChild){watcherSignature=watchSig;const heading=element('div','watchTitle');const grid=element('div','watchGrid');for(const [role,name] of Object.entries(slots)){if(!name)continue;const m=(ops.watcherEnergy||[]).find(v=>v.name===name);const card=element('div','watchMember');card.classList.toggle('watchUnavailable',!m?.online||m.idle||!Number.isFinite(m.energy)||m.energy<25);card.title=!m?.online?'Offline':m.idle?'Idle':!Number.isFinite(m.energy)?'Energy unknown':m.energy<25?'Insufficient energy':'Ready';card.append(element('span','watchName',(role==='primary'?'P':'S')+' · '+name),element('span','watchEnergy','⚡'+(m?.energy??'?')+'/'+(m?.maxEnergy??'?')));const liveMember=sharedMembers.find(v=>v.name===name);if(liveMember?.page)card.append(element('span','watchPage',liveMember.page));if(!m?.online)card.append(element('span','watchProblem','OFFLINE'));else if(m.idle)card.append(element('span','watchProblem','IDLE'));else if(!Number.isFinite(m.energy)||m.energy<25)card.append(element('span','watchProblem',Number.isFinite(m.energy)?'LOW E':'UNKNOWN E'));if(ops.claim?.name===name)card.append(element('span','claimed','NEXT'));if(name===me?.name){const b=element('button','claim',ops.claim?.name===name?'Release':'Next hit');b.disabled=ops.claim?.name!==name&&!ops.canClaim;b.onclick=()=>sendAction('claim',ops.claim?.name===name?'Release next hit':'Claim next hit');card.append(b);}grid.append(card);}watcher.replaceChildren(heading,grid);
       const assigned=Object.values(slots).includes(me?.name);
       if(ops.claim?.backup||(!assigned&&ops.backupOpen&&!ops.claim)){
         const backup=element('div','watchBackup');
@@ -559,8 +562,8 @@
     }
     watcher.firstChild.textContent=watchers;
     placePersonal(personal);
-    const fallbackOrder=isWarView()?(personal&&!personal.cleared?personal:null):(order||(personal&&!personal.cleared?personal:null));
-    if(fallbackOrder&&personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=fallbackOrder.text;}else extras.querySelector('.personalFallback')?.remove();
+    const fallbackOrder=isWarView()?(personal&&!personal.cleared?personal:null):((personal&&!personal.cleared?personal:null)||order);
+    if(fallbackOrder&&personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=fallbackOrder.text;fallback.classList.toggle('personalOrder',fallbackOrder===personal);}else extras.querySelector('.personalFallback')?.remove();
     positionFight();positionFlow();
     if(roomTabs){let selected=roomTabs.querySelector('.selected')?.dataset.tab;if((selected==='Orders'&&!me?.leader)||(selected==='Watch'&&(!me?.leader||!ops.warActive))){roomTabs.querySelector('[data-tab="Online"]')?.click();return;}assignments.hidden=!me?.leader||selected!=='Orders';opsBox.hidden=selected!=='Energy';leaders.hidden=!me?.leader||selected!=='Orders';for(const label of ['Orders','Watch']){const b=roomTabs.querySelector('[data-tab="'+label+'"]');if(b)b.hidden=!me?.leader||(label==='Watch'&&!ops.warActive);}}
     watchSection.hidden=!me?.leader || !ops.warActive || (roomTabs && roomTabs.querySelector('.selected')?.dataset.tab!=='Watch');
@@ -586,13 +589,13 @@
     if(sig===opsKey)return;opsKey=sig;
     const readings=opsBox.lastChild;
     const delta=t=>elapsed(now-Math.max(0,t-now));
-    const totals=element('div','energyTotals');for(const [name,value] of [['Online E',sum(fresh.filter(m=>m.online))],['Ready E',sum(ready)],['Fresh',fresh.filter(m=>m.online).length+'/'+members.filter(m=>m.online).length]]){const cell=element('div','energyTotal');cell.append(element('small','',name),element('b','',String(value)));totals.append(cell);}
+    const totals=element('div','energyTotals');for(const [name,value] of [['Online E',sum(fresh.filter(m=>m.online))],['Ready E',sum(ready)],['Offline E*',sum(members.filter(m=>!m.online&&Number.isFinite(m.energy)))]]){const cell=element('div','energyTotal');cell.append(element('small','',name),element('b','',String(value)));totals.append(cell);}
     const table=element('div',me?.leader?'energyTable':'energyTable memberEnergy');const header=element('div','energyRow energyHead');for(const name of (me?.leader?['Member','⚡ Energy','♥ HP','Booster']:['Member','⚡ Energy','♥ HP']))header.append(element('span','',name));table.append(header);
-    for(const m of members.filter(m=>m.online).sort((a,b)=>(b.energy??-1)-(a.energy??-1))){
-      const stale=!m.at||now-m.at>90000;const row=element('div','energyRow');const person=element('div','energyPerson');person.append(element('b','',m.name),element('small','',stale?'No fresh data':m.status||'Unknown'));row.append(person,element('span','',stale?'—':m.energy+'/'+(m.maxEnergy??'?')),element('span','',stale?'—':String(m.life??'?')));if(me?.leader)row.append(element('span','',stale||m.boosterUntil==null?'—':m.boosterUntil<=now?'Ready':delta(m.boosterUntil)));table.append(row);
+    for(const m of [...members].sort((a,b)=>Number(b.online)-Number(a.online)||(b.energy??-1)-(a.energy??-1))){
+      const stale=!m.at||now-m.at>90000;const row=element('div','energyRow');const person=element('div','energyPerson');person.append(presenceDot(m.presence||(m.online?'online':'offline')),element('b','',m.name),element('small','',!m.at?'No reading':stale?'Last known · '+elapsed(m.at)+' ago':m.status||'Unknown'));row.append(person,element('span','',Number.isFinite(m.energy)?m.energy+'/'+(m.maxEnergy??'?')+(stale?'*':''):'—'),element('span','',stale?'—':String(m.life??'?')));if(me?.leader)row.append(element('span','',stale||m.boosterUntil==null?'—':m.boosterUntil<=now?'Ready':delta(m.boosterUntil)));table.append(row);
       if(!stale&&m.destination&&m.destination!=='Torn')table.append(element('div','energyTravel','↳ '+m.destination+(m.landAt?' · '+new Date(m.landAt).toLocaleTimeString():'')));
     }
-    readings.replaceChildren(totals,table);
+    readings.replaceChildren(totals,table,element('small','energyFoot','* Last known energy; may have changed while disconnected.'));
 
   }
   function mount() {
@@ -639,7 +642,7 @@
     .watchWarning{border-color:#e06868!important;animation:fwPulse 1.8s ease-in-out infinite}.watchUnavailable{border-color:#a95757}.watchProblem{font-size:9px;color:#ff9b9b;font-weight:700}@keyframes fwPulse{50%{box-shadow:inset 0 0 9px #c54a4a99}}@media(prefers-reduced-motion:reduce){.watchWarning{animation:none;box-shadow:inset 0 0 5px #c54a4a}}
     .energyTotals{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:6px}.energyTotal{padding:6px;background:#26363d;border-radius:4px;display:flex;flex-direction:column;text-align:center}.energyTotal small{font-size:10px;color:#b5c6cc}.energyTotal b{font-size:16px;color:#d5eadb}.energyRow{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,.8fr) minmax(0,.9fr);gap:4px;align-items:center;border-bottom:1px solid #39464d;padding:6px 3px;font-size:11px;font-variant-numeric:tabular-nums}.energyRow>span{text-align:right;overflow-wrap:anywhere}.energyHead{font-size:10px;color:#aebfc6}.energyPerson{min-width:0;overflow-wrap:anywhere}.energyPerson small{display:block;font-size:10px;color:#a8b9bf}.energyTravel{font-size:10px;padding:2px 4px;color:#a8b9bf}
     `;
-    style.textContent+='\n.memberEnergy .energyRow{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr)}.connectionNote{padding:5px 8px;margin:0;color:#efcc79;font-size:11px}';
+    style.textContent+='\n.presenceDot{display:inline-block;margin-right:5px}.presenceDot.online{color:#86cf92}.presenceDot.idle{color:#efc269}.presenceDot.offline{color:#a2a8ae}.presenceMember:before{display:none}.presenceMember .member{display:flex;align-items:center;width:100%;gap:4px;text-align:left}.memberPage{margin-left:auto;font-size:11px;color:#a9c2cd;overflow-wrap:anywhere}.watchPage{width:100%;font-size:10px;color:#a9c2cd;overflow-wrap:anywhere}.personalOrder{color:#a6dcff!important}.signal.personalOrder{background:#203b50}.activityDialog{position:fixed;z-index:2147483646;top:15%;left:5%;width:90%;max-height:70vh;overflow:auto;background:#202b31;border:1px solid #6c858f;border-radius:7px;box-shadow:0 8px 32px #0009;padding:8px;color:white}.activityHeading{display:flex;justify-content:space-between;align-items:center}.activityRow{display:flex;flex-direction:column;padding:6px;border-bottom:1px solid #40535c}.activityRow small,.energyFoot{font-size:10px;color:#b5c6cc}.memberEnergy .energyRow{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr)}.connectionNote{padding:5px 8px;margin:0;color:#efcc79;font-size:11px}';
     panel = document.createElement('details');
     title = document.createElement('summary');
     panel.open=true;
@@ -696,8 +699,8 @@
     buildOps();
     guard=element('aside','banner','CHAIN BONUS WARNING · Outside target. Return to the faction war and select an enemy.');guard.hidden=true;guard.setAttribute('role','alert');
     roomTabs=element('div','roomTabs');const pages=[['Online',presence],['Energy',opsBox],['Orders',leaders,assignments],['Watch',watchSection]];const bar=element('div','roomNav');const content=element('div','roomContent');let active='Online';function choose(name){active=name;for(const [label,...nodes] of pages){for(const n of nodes)n.hidden=label!==name;const b=bar.querySelector('[data-tab="'+label+'"]');if(b)b.classList.toggle('selected',label===name);}if(name==='Energy')opsBox.open=true;if(name==='Orders')assignments.open=true;if(name==='Watch')watchSection.open=true;render();}for(const [label,...nodes] of pages){const b=element('button','',label);b.dataset.tab=label;b.onclick=()=>choose(label);bar.append(b);for(const n of nodes)content.append(n);}roomTabs.append(bar,content);panel.insertBefore(roomTabs,news);onlineTab.remove();globalTab.remove();output.remove();
-    personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);root.append(style,owner,panel);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;min-height:0;height:auto;flex:none;box-sizing:border-box;clear:both;overflow:visible';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
-    if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.hidden=true;}choose('Online');positionFlow();
+    personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);activityDialog=element('section','activityDialog');activityDialog.hidden=true;root.append(style,owner,panel,activityDialog);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;min-height:0;height:auto;flex:none;box-sizing:border-box;clear:both;overflow:visible';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
+    if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.open=false;const main=document.querySelector('#mainContainer,main,.content-wrapper')||document.body;main.prepend(host);}choose('Online');positionFlow();
     let scheduled=false;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;positionFlow();});});observer.observe(document.body,{childList:true,subtree:true});window.addEventListener('hashchange',()=>{positionFlow();renderOps();});
     window.addEventListener('resize',()=>{headerRect=null;placePersonal(ops.personal);});
     let headerFrame=0;window.addEventListener('scroll',()=>{if(!headerFrame)headerFrame=requestAnimationFrame(()=>{headerFrame=0;placePersonal(ops.personal);});},true);
