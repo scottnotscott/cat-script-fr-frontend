@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.9
+// @version      0.9.10
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        none
@@ -20,6 +20,8 @@
   const TORN_API_KEY = '###PDA-APIKEY###';
   const validKey = value => /^[a-zA-Z0-9]{16}$/.test(value);
   let key = validKey(TORN_API_KEY) ? TORN_API_KEY : '';
+  if(!key){try{const saved=sessionStorage.getItem('fw.relay.key');if(validKey(saved))key=saved;}catch{}}
+  let signedIn=false, loginForm, connectionNote;
   let retry;
   let revision, me, order, rosterAt = 0, online = [], leaders, target, directive, presence, owner, notice;
   const candidates = new Map();
@@ -106,8 +108,11 @@
     flash.hidden=false;flash.classList.remove('anchored');flash.style.removeProperty('top');flashTimer=setTimeout(dismissFlash,10000);
   }
   function isWarView(){const q=new URLSearchParams(location.search);const h=location.hash;return location.pathname==='/factions.php'&&q.get('step')!=='rankreport'&&q.get('step')!=='profile'&&(!q.get('type')||q.get('type')==='1')&&!h.includes('tab=')&&!/^#\/war\/\d+$/.test(h)&&(!h||h==='#/'||h.startsWith('#/war'));}
+  function roomView(){const q=new URLSearchParams(location.search);return location.pathname==='/factions.php' && q.get('step')!=='rankreport' && q.get('step')!=='profile';}
   function render() {
-    if (!title) return;
+    if (!title || !flowRoot) return;
+    if(connectionNote){connectionNote.textContent=status;connectionNote.hidden=signedIn&&status==='Connected';}
+    if(loginForm)loginForm.hidden=signedIn||!!key;
     title.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status);
     title.title=status;
     const signature=JSON.stringify(order || null);
@@ -203,7 +208,7 @@
       if (!sessionToken) {
         status = 'Signing in to VPS'; render();
         const login = await post('/login', 'ApiKey ' + key, {});
-        if (Number(login.status) === 403) { status = 'Check Torn key and faction'; render(); return; }
+        if (Number(login.status) === 403) { status = 'Key rejected · check faction membership and API key';signedIn=false;key='';try{sessionStorage.removeItem('fw.relay.key');}catch{}render();return; }
         if (Number(login.status) !== 200) throw Error('Login HTTP ' + (login.status || 0));
         sessionToken = JSON.parse(login.responseText).token;
         revision = null;
@@ -218,8 +223,8 @@
       if (rosterAt && Date.now()-rosterAt > 45000) await postNative(base+'/roster','Bearer '+sessionToken,{}, {'X-Torn-Key':key});
       for (const row of batch) if (pending.get(row.id) === row) pending.delete(row.id);
       void refreshIntel();
-      status = 'Connected';
-      panel?.querySelector('form')?.remove();
+      status = 'Connected';signedIn=true;
+      if(loginForm)loginForm.hidden=true;
     } catch (err) {
       const message = String(err?.message || '');
       status = (/^(Login HTTP \d+|Sync HTTP \d+|Request timed out)$/.test(message) ? message : 'request failed') + ' · retrying';
@@ -252,7 +257,7 @@
       authenticated = true;
       status = 'Connected';
       void refreshIntel();
-      panel?.querySelector('form')?.remove();
+      signedIn=true;if(loginForm)loginForm.hidden=true;
       accept(data);
       render();
       flush();
@@ -263,7 +268,7 @@
       if (!hadSession && e.code === 1006) return fallback();
       status = e.code === 1008 ? (e.reason || 'Access refused') : 'Disconnected';
       render();
-      if (e.code !== 1008) retry = setTimeout(connect,10000);
+      if(e.code===1008){signedIn=false;key='';try{sessionStorage.removeItem('fw.relay.key');}catch{}render();}else retry = setTimeout(connect,10000);
     };
   }
   setInterval(() => {if (authenticated) {socket.send(JSON.stringify({type:'roster',key}));void refreshIntel();}},45000);
@@ -490,10 +495,11 @@
   let flowHost, roomHost, newsControl, watcherNode, flowRoot;
   function positionFlow(){
     if(!flowHost||!roomHost)return;
-    const war=isWarView();
-    roomHost.hidden=!war;
+    const war=isWarView(), showRoom=roomView();
+    roomHost.hidden=!showRoom;
     owner.hidden=!war||!order;
-    panel.hidden=!war;
+    panel.hidden=!showRoom;
+    if(showRoom&&!roomHost.isConnected){const main=document.querySelector('#faction-main,#mainContainer,main,.content-wrapper')||document.body;main.prepend(roomHost);}
     if(!war)flash.hidden=true;
     const hasContent=[flash,attackAlert,guard,watcherNode].some(n=>n&&!n.hidden)||!!extras?.children.length;
     if(!hasContent){flowHost.hidden=true;flowHost.style.setProperty('display','none','important');return;}
@@ -553,9 +559,10 @@
     }
     watcher.firstChild.textContent=watchers;
     placePersonal(personal);
-    if(isWarView() && personal && !personal.cleared && personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=personal.text;}else extras.querySelector('.personalFallback')?.remove();
+    const fallbackOrder=isWarView()?(personal&&!personal.cleared?personal:null):(order||(personal&&!personal.cleared?personal:null));
+    if(fallbackOrder&&personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=fallbackOrder.text;}else extras.querySelector('.personalFallback')?.remove();
     positionFight();positionFlow();
-    if(roomTabs){const selected=roomTabs.querySelector('.selected')?.dataset.tab;assignments.hidden=!me?.leader||selected!=='Orders';opsBox.hidden=selected!=='Energy';leaders.hidden=!me?.leader||selected!=='Orders';for(const label of ['Orders','Watch']){const b=roomTabs.querySelector('[data-tab="'+label+'"]');if(b)b.hidden=!me?.leader||(label==='Watch'&&!ops.warActive);}}
+    if(roomTabs){let selected=roomTabs.querySelector('.selected')?.dataset.tab;if((selected==='Orders'&&!me?.leader)||(selected==='Watch'&&(!me?.leader||!ops.warActive))){roomTabs.querySelector('[data-tab="Online"]')?.click();return;}assignments.hidden=!me?.leader||selected!=='Orders';opsBox.hidden=selected!=='Energy';leaders.hidden=!me?.leader||selected!=='Orders';for(const label of ['Orders','Watch']){const b=roomTabs.querySelector('[data-tab="'+label+'"]');if(b)b.hidden=!me?.leader||(label==='Watch'&&!ops.warActive);}}
     watchSection.hidden=!me?.leader || !ops.warActive || (roomTabs && roomTabs.querySelector('.selected')?.dataset.tab!=='Watch');
     if(guard){const id=new URLSearchParams(location.search).get('user2ID');const inside=order?.text==='INSIDE HITS ONLY'||(ops.instructions||[]).some(x=>x.startsWith('INSIDE HITS ONLY'));guard.hidden=!(currentPage()==='Attack' && inside && ops.warActive && ops.enemyRosterFresh && id && !(ops.enemyIds||[]).includes(id));}
     positionFlow();
@@ -575,14 +582,14 @@
     const label='👥 '+online.length+' · ⚡ '+sum(fresh.filter(m=>m.online))+'E online · '+sum(ready)+'E ready';
     if(roomTabs)roomTabs.dataset.energy=label;
     opsBox.firstChild.textContent=label;
-    const sig=JSON.stringify([members,ready.length,Math.floor(now/5000)]);
+    const sig=JSON.stringify([members,ready.length,me?.leader,Math.floor(now/5000)]);
     if(sig===opsKey)return;opsKey=sig;
     const readings=opsBox.lastChild;
     const delta=t=>elapsed(now-Math.max(0,t-now));
     const totals=element('div','energyTotals');for(const [name,value] of [['Online E',sum(fresh.filter(m=>m.online))],['Ready E',sum(ready)],['Fresh',fresh.filter(m=>m.online).length+'/'+members.filter(m=>m.online).length]]){const cell=element('div','energyTotal');cell.append(element('small','',name),element('b','',String(value)));totals.append(cell);}
-    const table=element('div','energyTable');const header=element('div','energyRow energyHead');for(const name of ['Member','⚡ Energy','♥ HP','Booster'])header.append(element('span','',name));table.append(header);
+    const table=element('div',me?.leader?'energyTable':'energyTable memberEnergy');const header=element('div','energyRow energyHead');for(const name of (me?.leader?['Member','⚡ Energy','♥ HP','Booster']:['Member','⚡ Energy','♥ HP']))header.append(element('span','',name));table.append(header);
     for(const m of members.filter(m=>m.online).sort((a,b)=>(b.energy??-1)-(a.energy??-1))){
-      const stale=!m.at||now-m.at>90000;const row=element('div','energyRow');const person=element('div','energyPerson');person.append(element('b','',m.name),element('small','',stale?'No fresh data':m.status||'Unknown'));row.append(person,element('span','',stale?'—':m.energy+'/'+(m.maxEnergy??'?')),element('span','',stale?'—':String(m.life??'?')),element('span','',stale||m.boosterUntil==null?'—':m.boosterUntil<=now?'Ready':delta(m.boosterUntil)));table.append(row);
+      const stale=!m.at||now-m.at>90000;const row=element('div','energyRow');const person=element('div','energyPerson');person.append(element('b','',m.name),element('small','',stale?'No fresh data':m.status||'Unknown'));row.append(person,element('span','',stale?'—':m.energy+'/'+(m.maxEnergy??'?')),element('span','',stale?'—':String(m.life??'?')));if(me?.leader)row.append(element('span','',stale||m.boosterUntil==null?'—':m.boosterUntil<=now?'Ready':delta(m.boosterUntil)));table.append(row);
       if(!stale&&m.destination&&m.destination!=='Torn')table.append(element('div','energyTravel','↳ '+m.destination+(m.landAt?' · '+new Date(m.landAt).toLocaleTimeString():'')));
     }
     readings.replaceChildren(totals,table);
@@ -632,6 +639,7 @@
     .watchWarning{border-color:#e06868!important;animation:fwPulse 1.8s ease-in-out infinite}.watchUnavailable{border-color:#a95757}.watchProblem{font-size:9px;color:#ff9b9b;font-weight:700}@keyframes fwPulse{50%{box-shadow:inset 0 0 9px #c54a4a99}}@media(prefers-reduced-motion:reduce){.watchWarning{animation:none;box-shadow:inset 0 0 5px #c54a4a}}
     .energyTotals{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:6px}.energyTotal{padding:6px;background:#26363d;border-radius:4px;display:flex;flex-direction:column;text-align:center}.energyTotal small{font-size:10px;color:#b5c6cc}.energyTotal b{font-size:16px;color:#d5eadb}.energyRow{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,.8fr) minmax(0,.9fr);gap:4px;align-items:center;border-bottom:1px solid #39464d;padding:6px 3px;font-size:11px;font-variant-numeric:tabular-nums}.energyRow>span{text-align:right;overflow-wrap:anywhere}.energyHead{font-size:10px;color:#aebfc6}.energyPerson{min-width:0;overflow-wrap:anywhere}.energyPerson small{display:block;font-size:10px;color:#a8b9bf}.energyTravel{font-size:10px;padding:2px 4px;color:#a8b9bf}
     `;
+    style.textContent+='\n.memberEnergy .energyRow{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr)}.connectionNote{padding:5px 8px;margin:0;color:#efcc79;font-size:11px}';
     panel = document.createElement('details');
     title = document.createElement('summary');
     panel.open=true;
@@ -659,9 +667,9 @@
     panel.ontoggle = () => {if(panel.open) fillTargets(); render();};
     const onlineTab=element('details','');onlineTab.append(element('summary','','👥 Members & energy'));rosterTabs=element('div','rosterTabs');const tabs=element('div','tabrow');const peopleButton=element('button','','👥 Online');const energyButton=element('button','','⚡ Energy');peopleButton.onclick=()=>{presence.hidden=false;opsBox.hidden=true;};energyButton.onclick=()=>{if(me?.leader){presence.hidden=true;opsBox.hidden=false;opsBox.open=true;}};tabs.append(peopleButton,energyButton);rosterTabs.append(tabs,presence);onlineTab.append(rosterTabs);
     const globalTab=element('details','');globalTab.append(element('summary','','Global orders'),leaders);
-    panel.append(title,onlineTab,globalTab,output,news);
-    if (!key) {
-      const form = document.createElement('form');
+    connectionNote=element('p','connectionNote',status);panel.append(title,connectionNote,onlineTab,globalTab,output,news);
+    {
+      const form = loginForm=document.createElement('form');form.hidden=!!key;
       const input = document.createElement('input');
       input.type = 'password';
       input.placeholder = 'Public-access Torn API key';
@@ -674,9 +682,10 @@
       panel.append(form);
       form.onsubmit = event => {
         event.preventDefault();
-        if (!validKey(input.value)) return;
-        key = input.value;
-        input.value = '';
+        if (!validKey(input.value.trim())) return;
+        key = input.value.trim();
+        try{sessionStorage.setItem('fw.relay.key',key);}catch{}
+        input.value = '';form.hidden=true;
         if (socket) {socket.onclose = null; socket.close();}
         authenticated = false;
         connect();
@@ -695,6 +704,6 @@
     setInterval(()=>{if(document.hidden)return;positionFight();renderOps();for(const time of [...root.querySelectorAll('time[data-stamp]'),...flowRoot.querySelectorAll('time[data-stamp]')]) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
   }
-  function initialize(){mount();connect();}
+  function initialize(){try{mount();connect();}catch(err){console.error('[War Relay] Initialization failed',err);const warning=document.createElement('div');warning.textContent='War Relay failed to initialize. Check the console and reload.';warning.style.cssText='padding:8px;background:#633;color:white;font:12px system-ui';(document.querySelector('#mainContainer,main')||document.body).prepend(warning);}}
   if (document.body) initialize(); else document.addEventListener('DOMContentLoaded',initialize,{once:true});
 })();
