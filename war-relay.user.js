@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.11
+// @version      0.9.12
 // @match        https://www.torn.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      167.114.182.109
 // @updateURL    https://raw.githubusercontent.com/scottnotscott/cat-script-fr-frontend/main/war-relay.user.js
 // @downloadURL  https://raw.githubusercontent.com/scottnotscott/cat-script-fr-frontend/main/war-relay.user.js
 // ==/UserScript==
@@ -180,15 +182,21 @@
   window.addEventListener('hashchange',reportPresence);
 
   let syncing = false;
-  function nativeAvailable() {
-    return typeof PDA_httpPost === 'function' || typeof window.flutter_inappwebview?.callHandler === 'function';
-  }
+  const pageWindow=typeof unsafeWindow!=='undefined'?unsafeWindow:window;
+  function pdaAvailable(){return typeof PDA_httpPost==='function'||typeof pageWindow.PDA_httpPost==='function'||typeof pageWindow.flutter_inappwebview?.callHandler==='function';}
+  function gmAvailable(){return typeof GM_xmlhttpRequest==='function';}
+  function nativeAvailable(){return pdaAvailable()||gmAvailable();}
+  function transportName(){return pdaAvailable()?'PDA HTTP':gmAvailable()?'Tampermonkey HTTP':'HTTP bridge';}
   async function postNative(url, auth, data, extra = {}) {
     const args = [url, {Authorization: auth, 'Content-Type':'application/json', ...extra}, JSON.stringify(data)];
     let timer;
     try {
-      const request = typeof PDA_httpPost === 'function' ? PDA_httpPost(...args)
-        : window.flutter_inappwebview.callHandler('PDA_httpPost', ...args);
+      let request;
+      if(typeof PDA_httpPost==='function')request=PDA_httpPost(...args);
+      else if(typeof pageWindow.PDA_httpPost==='function')request=pageWindow.PDA_httpPost(...args);
+      else if(typeof pageWindow.flutter_inappwebview?.callHandler==='function')request=pageWindow.flutter_inappwebview.callHandler('PDA_httpPost',...args);
+      else if(gmAvailable())request=new Promise((resolve,reject)=>GM_xmlhttpRequest({method:'POST',url,headers:args[1],data:args[2],timeout:14000,anonymous:true,onload:r=>resolve({status:r.status,responseText:r.responseText}),onerror:()=>reject(Error('VPS HTTP request failed')),ontimeout:()=>reject(Error('Request timed out')),onabort:()=>reject(Error('Request aborted'))}));
+      else throw Error('No HTTP bridge');
       const result = await Promise.race([request, new Promise((_, reject) => {
         timer = setTimeout(() => reject(Error('Request timed out')), 15000);
       })]);
@@ -198,7 +206,7 @@
   async function syncNative() {
     if (syncing) return;
     if (!nativeAvailable()) {
-      status = 'Waiting for PDA HTTP bridge';
+      status = 'Waiting for HTTP bridge';
       render();
       retry = setTimeout(syncNative, 2000);
       return;
@@ -217,7 +225,7 @@
         revision = null;
       }
       const batch = [...pending.values()];
-      if (!feed.length && status !== 'Connected · PDA') { status = '↺'; render(); }
+      if (!signedIn) { status = 'Connecting via '+transportName(); render(); }
       const res = await post('/sync', 'Bearer ' + sessionToken, {attacks:batch,revision,delta:true,chain:chainObservation,...pageInfo()});
       if (Number(res.status) === 401) sessionToken = null;
       if (Number(res.status) !== 200) throw Error('Sync HTTP ' + (res.status || 0));
@@ -238,14 +246,14 @@
   }
   function fallback() {
     if (nativeAvailable()) return syncNative();
-    status = 'WebSocket unavailable';
+    status = 'HTTP bridge unavailable · enable Tampermonkey permissions or use PDA';
     render();
     retry = setTimeout(connect,10000);
   }
   function connect() {
     clearTimeout(retry);
     if (!key) return;
-    if (validKey(TORN_API_KEY) || nativeAvailable()) return syncNative();
+    if (nativeAvailable() || validKey(TORN_API_KEY)) return syncNative();
     status = 'Connecting';
     render();
     try { socket = new WebSocket(RELAY_URL); } catch { return fallback(); }
@@ -323,21 +331,26 @@
   const relevant = value => {
     try { const u = new URL(value,location.href); return u.origin === location.origin && (u.pathname === '/faction_wars.php' || ['getwardata','getwarusers'].includes(u.searchParams.get('step'))); } catch { return false; }
   };
-  const original = window.fetch;
-  window.fetch = async function(...args) {
+  // With GM grants Tampermonkey runs in a sandbox; observe the page's own network APIs.
+  try {
+  const original = pageWindow.fetch;
+  const observedFetch = async function(...args) {
     const sampleAt=Date.now();
     const res = await original.apply(this,args);
     if (relevant(res.url)) { try { res.clone().json().then(data=>observe(data,sampleAt)).catch(() => {}); } catch {} }
     return res;
   };
-  const open = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method,url,...rest) {
+  pageWindow.fetch=typeof exportFunction==='function'?exportFunction(observedFetch,pageWindow):observedFetch;
+  const open = pageWindow.XMLHttpRequest.prototype.open;
+  const observedOpen = function(method,url,...rest) {
     const sampleAt=Date.now();
     if (relevant(url)) this.addEventListener('load',function() {
       try { if (relevant(this.responseURL)) observe(this.responseType === 'json' ? this.response : JSON.parse(this.responseText),sampleAt); } catch {}
     },{once:true});
     return open.call(this,method,url,...rest);
   };
+  pageWindow.XMLHttpRequest.prototype.open=typeof exportFunction==='function'?exportFunction(observedOpen,pageWindow):observedOpen;
+  }catch(err){console.warn('[War Relay] Page observation hooks unavailable',err?.message);}
   function fillTargets() {
     if (!target) return;
     const names = new Set(candidates.values());
@@ -361,7 +374,8 @@
     let hidden=false,section,anchor,chainAnchor,timer;
     try {hidden=localStorage.getItem('fw.hideNews')==='1';} catch {}
     function locate() {
-      const scope=document.querySelector('#faction-main,.content-wrapper,#mainContainer,main') || document.body;
+      const scope=document.querySelector('#faction-main') || safeContent();
+      if(!scope)return;
       const walker=document.createTreeWalker(scope,NodeFilter.SHOW_TEXT);
       const news=[];
       let announcement,chainLabel,warLabel;
@@ -496,16 +510,21 @@
     personalHeader.hidden=false;
   }
   let flowHost, roomHost, newsControl, watcherNode, flowRoot;
+  function safeContent(){return document.querySelector('#mainContainer > .content-wrapper[role="main"]')||document.querySelector('.content-wrapper[role="main"]')||document.querySelector('#mainContainer > .content-wrapper')||document.querySelector('main[role="main"],main');}
+  function desktopLayout(){return !!document.querySelector('#mainContainer > #sidebarroot')&&innerWidth>=760;}
+  function mountRoom(){const main=safeContent();if(!main||!roomHost)return false;if(!roomHost.isConnected||(!isWarView()&&!main.contains(roomHost))){const heading=main.querySelector(':scope > .content-title');if(heading)heading.after(roomHost);else main.prepend(roomHost);}return true;}
   function positionFlow(){
     if(!flowHost||!roomHost)return;
     const war=isWarView(), showRoom=roomView();
     roomHost.hidden=!showRoom;
     owner.hidden=!war||!order;
     panel.hidden=!showRoom;
-    if(showRoom&&!roomHost.isConnected){const main=document.querySelector('#faction-main,#mainContainer,main,.content-wrapper')||document.body;main.prepend(roomHost);}
+    if(showRoom)mountRoom();
     if(!war)flash.hidden=true;
     const hasContent=[flash,attackAlert,guard,watcherNode].some(n=>n&&!n.hidden)||!!extras?.children.length;
     if(!hasContent){flowHost.hidden=true;flowHost.style.setProperty('display','none','important');return;}
+    const main=safeContent();
+    if(desktopLayout()){if(main){if(main.firstElementChild!==flowHost)main.prepend(flowHost);flowHost.hidden=false;flowHost.style.setProperty('display','block','important');}else{flowHost.hidden=true;flowHost.style.setProperty('display','none','important');}return;}
     const row=visibleIconRow();
     let anchor=row;
     // Escape fixed-height header wrappers and insert in the normal page flow.
@@ -514,8 +533,7 @@
       if(r.height>360)break;
       if(/^(fixed|absolute|sticky)$/.test(css.position)||/hidden|clip/.test(css.overflowY)||/flex|grid/.test(css.display)||p.clientHeight<p.scrollHeight-2)anchor=p;
     }}
-    const main=document.querySelector('#mainContainer,main,.content-wrapper');
-    if(anchor?.parentElement && !flowHost.contains(anchor) && !roomHost.contains(anchor) && !/^(fixed|absolute)$/.test(getComputedStyle(anchor.parentElement).position)){
+    if(anchor?.parentElement && anchor.parentElement.id!=='mainContainer' && anchor.parentElement!==document.body && !flowHost.contains(anchor) && !roomHost.contains(anchor) && !/^(fixed|absolute)$/.test(getComputedStyle(anchor.parentElement).position) && !/flex|grid/.test(getComputedStyle(anchor.parentElement).display)){
       if(anchor.nextElementSibling!==flowHost)anchor.after(flowHost);
     }else if(main && !flowHost.contains(main) && !/^(fixed|absolute)$/.test(getComputedStyle(main).position)){
       if(main.firstElementChild!==flowHost)main.prepend(flowHost);
@@ -700,13 +718,13 @@
     guard=element('aside','banner','CHAIN BONUS WARNING · Outside target. Return to the faction war and select an enemy.');guard.hidden=true;guard.setAttribute('role','alert');
     roomTabs=element('div','roomTabs');const pages=[['Online',presence],['Energy',opsBox],['Orders',leaders,assignments],['Watch',watchSection]];const bar=element('div','roomNav');const content=element('div','roomContent');let active='Online';function choose(name){active=name;for(const [label,...nodes] of pages){for(const n of nodes)n.hidden=label!==name;const b=bar.querySelector('[data-tab="'+label+'"]');if(b)b.classList.toggle('selected',label===name);}if(name==='Energy')opsBox.open=true;if(name==='Orders')assignments.open=true;if(name==='Watch')watchSection.open=true;render();}for(const [label,...nodes] of pages){const b=element('button','',label);b.dataset.tab=label;b.onclick=()=>choose(label);bar.append(b);for(const n of nodes)content.append(n);}roomTabs.append(bar,content);panel.insertBefore(roomTabs,news);onlineTab.remove();globalTab.remove();output.remove();
     personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);activityDialog=element('section','activityDialog');activityDialog.hidden=true;root.append(style,owner,panel,activityDialog);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;min-height:0;height:auto;flex:none;box-sizing:border-box;clear:both;overflow:visible';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
-    if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.open=false;const main=document.querySelector('#mainContainer,main,.content-wrapper')||document.body;main.prepend(host);}choose('Online');positionFlow();
+    if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.open=false;mountRoom();}choose('Online');positionFlow();
     let scheduled=false;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;positionFlow();});});observer.observe(document.body,{childList:true,subtree:true});window.addEventListener('hashchange',()=>{positionFlow();renderOps();});
     window.addEventListener('resize',()=>{headerRect=null;placePersonal(ops.personal);});
     let headerFrame=0;window.addEventListener('scroll',()=>{if(!headerFrame)headerFrame=requestAnimationFrame(()=>{headerFrame=0;placePersonal(ops.personal);});},true);
     setInterval(()=>{if(document.hidden)return;positionFight();renderOps();for(const time of [...root.querySelectorAll('time[data-stamp]'),...flowRoot.querySelectorAll('time[data-stamp]')]) {if(time.getClientRects().length) time.textContent=elapsed(Number(time.dataset.stamp))+' ago';}},1000);
     render();
   }
-  function initialize(){try{mount();connect();}catch(err){console.error('[War Relay] Initialization failed',err);const warning=document.createElement('div');warning.textContent='War Relay failed to initialize. Check the console and reload.';warning.style.cssText='padding:8px;background:#633;color:white;font:12px system-ui';(document.querySelector('#mainContainer,main')||document.body).prepend(warning);}}
+  function initialize(){try{mount();connect();}catch(err){console.error('[War Relay] Initialization failed',err);const warning=document.createElement('div');warning.textContent='War Relay failed to initialize. Check the console and reload.';warning.style.cssText='padding:8px;background:#633;color:white;font:12px system-ui';(safeContent()||document.body).prepend(warning);}}
   if (document.body) initialize(); else document.addEventListener('DOMContentLoaded',initialize,{once:true});
 })();
