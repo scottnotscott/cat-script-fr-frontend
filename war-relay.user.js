@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.12
+// @version      0.9.13
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -27,7 +27,7 @@
   let retry;
   let revision, me, order, rosterAt = 0, online = [], leaders, target, directive, presence, owner, notice;
   const candidates = new Map();
-  const commands = ['EVERYONE TURTLE','EVERYONE ATTACK','EVERYONE PILE ON','DRAG CHAIN OUT','AIM->1k CHAIN','INSIDE HITS ONLY','Clear order','BUILD CHAIN','CHAIN DENIAL - HOSP ONLINERS'];
+  const commands = ['EVERYONE TURTLE','EVERYONE PILE ON','DRAG CHAIN OUT','AIM->1k CHAIN','INSIDE HITS ONLY','Clear order','BUILD CHAIN','CHAIN DENIAL - HOSP ONLINERS'];
   let ops={}, nextIntel=0, chainObservation=null, opsBox, assignments, recipient, memberCommand, watchList, extras, attackAlert, shareButton;
   let previousFights=null, fightUntil=0, selectedFight=null, previousSignal=null;
   const dismissedFights=new Map();
@@ -39,9 +39,10 @@
     if(authenticated){socket.send(JSON.stringify({type:'intel',key}));return;}
     try { await postNative(endpoint('/intel'),'Bearer '+sessionToken,{}, {'X-Torn-Key':key}); } catch {}
   }
+  let orderHistory=[],primaryDuration,secondaryDuration,orderHistoryBox,inlineOrder,takeoverDialog;
   let sharedMembers=[], activityDialog, activityId, activityTab='Pages', activitySignature='', personalInline;
   function accept(data) {
-    if(Array.isArray(data.members))sharedMembers=data.members;
+    if(Array.isArray(data.members))sharedMembers=data.members;if(Array.isArray(data.orderHistory))orderHistory=data.orderHistory;
     ops=data.ops || {};
     if(Array.isArray(data.attackChanges)){
       const entries=new Map(feed.map(a=>[a.id,a]));
@@ -125,14 +126,14 @@
     const signature=JSON.stringify(order || null);
     if (signature!==lastOrder) {
       lastOrder=signature;
-      owner.hidden=!order||!isWarView();
+      owner.hidden=!order;
       dismissFlash();
       if (order) {
         const command=element('b','command',order.text);
         const who=element('div','issued','Issued by '+order.by+' · ');
         who.append(clock(order.at));
-        owner.replaceChildren(element('small','','ACTIVE WAR ORDER'),command,who);
-        if (Date.now()-order.at<30000) {
+        owner.replaceChildren(element('small','','ACTIVE WAR ORDER'),command,who);owner.className='banner severity-'+(order.severity||'neutral')+(order.pulse?' orderPulse':'');
+        if (false) {
           flash.replaceChildren(element('small','','NEW WAR ORDER'),command.cloneNode(true),element('span','',order.by));
           showFlash();
         }
@@ -140,7 +141,7 @@
     }
     renderOps();
     if (!panel.open) return;
-    leaders.hidden=!me?.leader || (roomTabs && roomTabs.querySelector('.selected')?.dataset.tab!=='Orders');
+    leaders.hidden=!(me?.canOrder??me?.leader) || (roomTabs && roomTabs.querySelector('.selected')?.dataset.tab!=='Orders');
     renderActivity();
     const rosterKey=JSON.stringify([sharedMembers.map(m=>[m.id,m.name,m.presence,m.page]),online]);
     if (rosterKey!==lastRoster) {
@@ -173,10 +174,11 @@
   function currentPage(){
     const p=location.pathname, h=location.hash;
     if(p==='/factions.php')return /war|chain/i.test(h)?'Faction war':'Faction';
-    if(p==='/loader.php' && new URLSearchParams(location.search).get('sid')==='attack')return 'Attack';
+    if((p==='/loader.php'||p==='/page.php') && new URLSearchParams(location.search).get('sid')==='attack')return 'Attack';
     return ({'/hospital.php':'Hospital','/travelagency.php':'Travel','/item.php':'Items','/gym.php':'Gym','/crimes.php':'Crimes','/profiles.php':'Profile'})[p]||'Other';
   }
-  function pageInfo(){const targetId=new URLSearchParams(location.search).get('user2ID');const heading=document.querySelector('#mainContainer h1, .content-title h4, main h1');const title=(heading?.textContent?.trim()||document.title.replace(/\s*[-|–]\s*Torn.*$/i,'')||currentPage()).slice(0,70);const targetName=feed.find(a=>a.pair?.split('-')[1]===targetId)?.defender||document.querySelector('a[href*="XID='+targetId+'"]')?.textContent?.trim()||targetId;return {page:currentPage()==='Attack'&&targetId?'→ '+targetName:title,focused:document.hasFocus(),visible:!document.hidden,targetId};}
+  function pageInfo(){const q=new URLSearchParams(location.search),kind=currentPage(),targetId=kind==='Attack'?q.get('user2ID'):kind==='Profile'?q.get('XID'):null;const heading=document.querySelector('#mainContainer h1,.content-title h4,main h1');const title=(heading?.textContent?.trim()||document.title.replace(/\s*[-|–]\s*Torn.*$/i,'')||kind).slice(0,70);const targetName=sharedMembers.find(m=>String(m.id)===targetId)?.name||feed.find(a=>a.pair?.split('-')[1]===targetId)?.defender||document.querySelector('a[href*="XID='+targetId+'"]')?.textContent?.trim()||targetId;return {page:targetId&&(kind==='Attack'||kind==='Profile')?kind+' · '+targetName:title,focused:document.hasFocus(),visible:!document.hidden,targetId};}
+
   function reportPresence(){if(authenticated && socket?.readyState===1)socket.send(JSON.stringify({type:'presence',...pageInfo()}));}
   setInterval(reportPresence,5000);
   window.addEventListener('hashchange',reportPresence);
@@ -442,8 +444,8 @@
     
   }
   const orderWaiters=new Map();
-  async function sendAction(scope,command,target,ids) {
-    const payload={type:'order',scope,command,target,ids};
+  async function sendAction(scope,command,target,ids,extra={}) {
+    const payload={type:'order',scope,command,target,ids,...extra};
     notice.textContent=' Sending…';
     try {
       if(authenticated && socket?.readyState===1){
@@ -473,31 +475,27 @@
     for(const o of select.options)if(selected.includes(o.value))o.selected=true;
     select.dataset.options=sig;
   }
+  function durationSelect(){const s=element('select','');for(let n=30;n<=720;n+=30)s.add(new Option((n>=60?Math.floor(n/60)+'h ':'')+(n%60?n%60+'m':''),String(n)));return s;}
+  function takeOver(role){if(!takeoverDialog)return;const select=durationSelect(),confirm=element('button','','Take over'),cancel=element('button','','Cancel'),msg=element('p','','Choose your availability');confirm.onclick=async()=>{confirm.disabled=true;const ok=await sendAction('takeover','Take over',role,undefined,{minutes:Number(select.value)});if(ok)takeoverDialog.hidden=true;else{msg.textContent=notice.textContent;confirm.disabled=false;}};cancel.onclick=()=>takeoverDialog.hidden=true;takeoverDialog.replaceChildren(element('h4','','Take over '+role),msg,select,confirm,cancel);takeoverDialog.hidden=false;}
   function buildOps() {
 
     opsBox=element('details','headcount');
     opsBox.append(element('summary','','Energy headcount'),element('div','readings'));
     assignments=element('details','assignments');
     assignments.append(element('summary','','Member orders and chain watch'));
-    recipient=element('select','');recipient.setAttribute('aria-label','Faction member');
-    memberCommand=element('select','');
-    options(memberCommand,['SIT ABROAD (CLOSE)','SIT ABROAD (FAR)','TURTLE','OUTSIDE HITS ONLY','INSIDE HITS ONLY','BUILD CHAIN','Clear personal order'].map(s=>[s,s]));
-    memberCommand.onchange=()=>renderOps();
-    const issue=element('button','','Apply to member');
-    issue.onclick=()=>{if(recipient.value && (['Assign watcher','Remove watcher','Clear personal order'].includes(memberCommand.value)||(ops.available||[]).includes(recipient.value)))sendAction('member',memberCommand.value,recipient.value);};
     watchList=element('select','');watchList.multiple=true;watchList.size=4;
     const enable=element('button','','Build chain · watch selected');
     enable.onclick=()=>sendAction('watch','Watch enemies','',[...watchList.selectedOptions].map(o=>o.value));
     const disable=element('button','','Stop enemy watch');disable.onclick=()=>sendAction('watch','Stop watching enemies');
     watchSection=element('details','assignments');watchSection.append(element('summary','','Enemy watch'),watchList,enable,disable);
-    assignments.append(element('h4','','Individual orders'),recipient,memberCommand,issue);activeOrders=element('div','activeOrders');assignments.append(activeOrders);watcherSettings=element('div','orderGroup');primarySelect=element('select','');secondarySelect=element('select','');primarySelect.setAttribute('aria-label','Primary watcher');secondarySelect.setAttribute('aria-label','Secondary watcher');const saveWatch=element('button','','Save watchers');saveWatch.onclick=()=>{if(primarySelect.value&&primarySelect.value===secondarySelect.value){notice.textContent='Choose two different members';return;}sendAction('member','Set chain watchers','',[primarySelect.value,secondarySelect.value]);};const pLabel=element('label','','Primary');pLabel.append(primarySelect);const sLabel=element('label','','Secondary');sLabel.append(secondarySelect);watcherSettings.append(element('h4','','Chain watchers'),pLabel,sLabel,saveWatch);assignments.append(watcherSettings);panel.insertBefore(watchSection,output);
+    watcherSettings=element('div','orderGroup');primarySelect=element('select','');secondarySelect=element('select','');primaryDuration=durationSelect();secondaryDuration=durationSelect();const saveWatch=element('button','','Save watchers');saveWatch.onclick=()=>{if(primarySelect.value&&primarySelect.value===secondarySelect.value){notice.textContent='Choose two different members';return;}sendAction('member','Set chain watchers','',[primarySelect.value,secondarySelect.value],{durations:[Number(primaryDuration.value),Number(secondaryDuration.value)]});};const pLabel=element('label','','Primary');pLabel.append(primarySelect,primaryDuration);const sLabel=element('label','','Secondary');sLabel.append(secondarySelect,secondaryDuration);watcherSettings.append(element('h4','','Chain watchers'),pLabel,sLabel,saveWatch);assignments.append(watcherSettings);panel.insertBefore(watchSection,output);
     rosterTabs.append(opsBox);opsBox.hidden=true;panel.insertBefore(assignments,output);
   }
   let opsKey='', watchSection, guard, personalHeader, rosterTabs, headerRect, roomTabs, primarySelect, secondarySelect, watcherSettings, activeOrders, watcherSignature='', slotSignature='';
   function placePersonal(personal){
     if(!personalHeader)return;
     const activePersonal=personal&&!personal.cleared?personal:null;
-    const shown=isWarView()?activePersonal:(activePersonal||order);
+    const shown=desktopLayout()||isWarView()?null:order;
     personalHeader.hidden=true;if(!shown)return;
     const logo=document.querySelector('a[href="/"],a[href="/index.php"],#logo,.logo');
     const search=document.querySelector('[aria-label*="search" i],[title="Search"],button[class*="search"]');
@@ -517,7 +515,7 @@
     if(!flowHost||!roomHost)return;
     const war=isWarView(), showRoom=roomView();
     roomHost.hidden=!showRoom;
-    owner.hidden=!war||!order;
+    owner.hidden=!order;
     panel.hidden=!showRoom;
     if(showRoom)mountRoom();
     if(!war)flash.hidden=true;
@@ -545,9 +543,9 @@
 
   function renderOps() {
     if(!extras || !opsBox || !flowRoot || !roomHost || !personalHeader)return;
-    const personal=ops.personal?.cleared && Date.now()-ops.personal.at>=10000 ? null : ops.personal;
+    const personal=null;
     const lines=[...(ops.instructions || [])];
-    if(personal?.cleared)lines.unshift('@'+personal.by+' cleared your order');
+    
     const signal=JSON.stringify([lines,personal?.at,personal?.text]);
     if(signal!==previousSignal){
       const first=previousSignal===null;
@@ -561,11 +559,11 @@
     const watchers='🔗 '+(ops.chain?.count||0)+' · '+(ops.chain?.count?timer:'Inactive')+' · '+(ops.claim?ops.claim.name+' next':'Unclaimed');
     let watcher=watcherNode;if(!watcher){watcher=watcherNode=element('div','watchers');flowRoot.append(watcher);}
     const slots=ops.watchSlots||{primary:ops.watchers?.[0],secondary:ops.watchers?.[1]};
-    const watchSig=JSON.stringify([slots,ops.watcherEnergy,ops.claim,ops.canClaim,ops.backupOpen,me?.name,sharedMembers.filter(m=>Object.values(slots).includes(m.name)).map(m=>[m.name,m.page,m.presence])]);
+    const watchSig=JSON.stringify([slots,ops.watchUntil,ops.takeover,ops.watcherEnergy,ops.claim,ops.canClaim,ops.backupOpen,me?.name,sharedMembers.filter(m=>Object.values(slots).includes(m.name)).map(m=>[m.name,m.page,m.presence])]);
     const unavailable=Object.values(slots).filter(Boolean).some(name=>{const m=(ops.watcherEnergy||[]).find(v=>v.name===name);return !m?.online || m.idle || !Number.isFinite(m.energy) || m.energy<25;});
     watcher.classList.toggle('watchWarning',unavailable);
-    watcher.hidden=!slots.primary&&!slots.secondary&&!ops.claim;
-    if(watcherSignature!==watchSig||!watcher.firstChild){watcherSignature=watchSig;const heading=element('div','watchTitle');const grid=element('div','watchGrid');for(const [role,name] of Object.entries(slots)){if(!name)continue;const m=(ops.watcherEnergy||[]).find(v=>v.name===name);const card=element('div','watchMember');card.classList.toggle('watchUnavailable',!m?.online||m.idle||!Number.isFinite(m.energy)||m.energy<25);card.title=!m?.online?'Offline':m.idle?'Idle':!Number.isFinite(m.energy)?'Energy unknown':m.energy<25?'Insufficient energy':'Ready';card.append(element('span','watchName',(role==='primary'?'P':'S')+' · '+name),element('span','watchEnergy','⚡'+(m?.energy??'?')+'/'+(m?.maxEnergy??'?')));const liveMember=sharedMembers.find(v=>v.name===name);if(liveMember?.page)card.append(element('span','watchPage',liveMember.page));if(!m?.online)card.append(element('span','watchProblem','OFFLINE'));else if(m.idle)card.append(element('span','watchProblem','IDLE'));else if(!Number.isFinite(m.energy)||m.energy<25)card.append(element('span','watchProblem',Number.isFinite(m.energy)?'LOW E':'UNKNOWN E'));if(ops.claim?.name===name)card.append(element('span','claimed','NEXT'));if(name===me?.name){const b=element('button','claim',ops.claim?.name===name?'Release':'Next hit');b.disabled=ops.claim?.name!==name&&!ops.canClaim;b.onclick=()=>sendAction('claim',ops.claim?.name===name?'Release next hit':'Claim next hit');card.append(b);}grid.append(card);}watcher.replaceChildren(heading,grid);
+    watcher.hidden=!slots.primary&&!slots.secondary&&!ops.claim&&!ops.chain?.count;
+    if(watcherSignature!==watchSig||!watcher.firstChild){watcherSignature=watchSig;const heading=element('div','watchTitle');const grid=element('div','watchGrid');for(const [role,name] of Object.entries(slots)){if(!name&&!ops.takeover?.[role])continue;const m=(ops.watcherEnergy||[]).find(v=>v.name===name);const card=element('div','watchMember');card.classList.toggle('watchUnavailable',!m?.online||m.idle||!Number.isFinite(m.energy)||m.energy<25);card.title=!m?.online?'Offline':m.idle?'Idle':!Number.isFinite(m.energy)?'Energy unknown':m.energy<25?'Insufficient energy':'Ready';card.append(element('span','watchName',(role==='primary'?'P':'S')+' · '+(name||'Vacant')),element('span','watchEnergy','⚡'+(m?.energy??'?')+'/'+(m?.maxEnergy??'?')));const liveMember=sharedMembers.find(v=>v.name===name);if(liveMember?.page)card.append(element('span','watchPage',liveMember.page));if(!m?.online)card.append(element('span','watchProblem','OFFLINE'));else if(m.idle)card.append(element('span','watchProblem','IDLE'));else if(!Number.isFinite(m.energy)||m.energy<25)card.append(element('span','watchProblem',Number.isFinite(m.energy)?'LOW E':'UNKNOWN E'));if(name&&ops.watchUntil?.[role])card.append(element('span','watchPage','Until '+new Date(ops.watchUntil[role]).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})));if(ops.takeover?.[role]){const take=element('button','claim','Take over');take.onclick=()=>takeOver(role);card.append(take);}if(name&&ops.claim?.name===name)card.append(element('span','claimed','NEXT'));if(name&&name===me?.name){const b=element('button','claim',ops.claim?.name===name?'Release':'Next hit');b.disabled=ops.claim?.name!==name&&!ops.canClaim;b.onclick=()=>sendAction('claim',ops.claim?.name===name?'Release next hit':'Claim next hit');card.append(b);}grid.append(card);}watcher.replaceChildren(heading,grid);
       const assigned=Object.values(slots).includes(me?.name);
       if(ops.claim?.backup||(!assigned&&ops.backupOpen&&!ops.claim)){
         const backup=element('div','watchBackup');
@@ -580,21 +578,21 @@
     }
     watcher.firstChild.textContent=watchers;
     placePersonal(personal);
-    const fallbackOrder=isWarView()?(personal&&!personal.cleared?personal:null):((personal&&!personal.cleared?personal:null)||order);
+    const fallbackOrder=null;
     if(fallbackOrder&&personalHeader?.hidden){let fallback=extras.querySelector('.personalFallback');if(!fallback){fallback=element('div','signal personalFallback');extras.prepend(fallback);}fallback.textContent=fallbackOrder.text;fallback.classList.toggle('personalOrder',fallbackOrder===personal);}else extras.querySelector('.personalFallback')?.remove();
     positionFight();positionFlow();
-    if(roomTabs){let selected=roomTabs.querySelector('.selected')?.dataset.tab;if((selected==='Orders'&&!me?.leader)||(selected==='Watch'&&(!me?.leader||!ops.warActive))){roomTabs.querySelector('[data-tab="Online"]')?.click();return;}assignments.hidden=!me?.leader||selected!=='Orders';opsBox.hidden=selected!=='Energy';leaders.hidden=!me?.leader||selected!=='Orders';for(const label of ['Orders','Watch']){const b=roomTabs.querySelector('[data-tab="'+label+'"]');if(b)b.hidden=!me?.leader||(label==='Watch'&&!ops.warActive);}}
+    if(roomTabs){let selected=roomTabs.querySelector('.selected')?.dataset.tab;if((selected==='Orders'&&!(me?.canOrder??me?.leader))||(selected==='Watch'&&(!me?.leader||!ops.warActive))){roomTabs.querySelector('[data-tab="Online"]')?.click();return;}assignments.hidden=!me?.leader||selected!=='Orders';opsBox.hidden=selected!=='Energy';leaders.hidden=!(me?.canOrder??me?.leader)||selected!=='Orders';for(const label of ['Orders','Watch']){const b=roomTabs.querySelector('[data-tab="'+label+'"]');if(b)b.hidden=label==='Orders'?!(me?.canOrder??me?.leader):!me?.leader||!ops.warActive;}}
     watchSection.hidden=!me?.leader || !ops.warActive || (roomTabs && roomTabs.querySelector('.selected')?.dataset.tab!=='Watch');
-    if(guard){const id=new URLSearchParams(location.search).get('user2ID');const inside=order?.text==='INSIDE HITS ONLY'||(ops.instructions||[]).some(x=>x.startsWith('INSIDE HITS ONLY'));guard.hidden=!(currentPage()==='Attack' && inside && ops.warActive && ops.enemyRosterFresh && id && !(ops.enemyIds||[]).includes(id));}
+    if(guard){const id=new URLSearchParams(location.search).get('user2ID');const inside=order?.text?.toUpperCase()==='INSIDE HITS ONLY'||(ops.instructions||[]).some(x=>x.startsWith('INSIDE HITS ONLY'));guard.hidden=!(currentPage()==='Attack' && inside && ops.warActive && ops.enemyRosterFresh && id && !(ops.enemyIds||[]).includes(id));}
     positionFlow();
     if(!panel.open)return;
     if(me?.leader){
-    options(recipient,(['Assign watcher','Remove watcher','Clear personal order'].includes(memberCommand.value)?ops.members||[]:ops.available||[]).map(n=>[n,n]));
+
     const before=watchList.dataset.options;
     options(watchList,(ops.enemies || []).map(m=>[m.id,m.name+(m.online?' · online':'')]));
     if(before!==watchList.dataset.options)for(const o of watchList.options)o.selected=(ops.watchIds || []).includes(o.value);
     const list=[['','Unassigned'],...(ops.members||[]).map(n=>[n,n])];options(primarySelect,list);options(secondarySelect,list);const slotKey=JSON.stringify(ops.watchSlots||{});if(slotSignature!==slotKey){slotSignature=slotKey;primarySelect.value=ops.watchSlots?.primary||'';secondarySelect.value=ops.watchSlots?.secondary||'';}
-    const records=Array.isArray(ops.assignments)?ops.assignments:[];const key=JSON.stringify(records);if(activeOrders.dataset.key!==key){activeOrders.dataset.key=key;activeOrders.replaceChildren(element('h4','','Current individual orders · '+records.length));if(!records.length)activeOrders.append(element('p','','No active individual orders'));for(const r of records){const line=element('div','orderLine');const info=element('div','');info.append(element('b','',r.name),element('span','',r.text));const clear=element('button','','Clear');clear.onclick=()=>sendAction('member','Clear personal order',r.name);line.append(info,clear);activeOrders.append(line);}}
+
     }
     const members=ops.resources || [], now=Date.now();
     const fresh=members.filter(m=>Number.isFinite(m.energy)&&now-m.at<=90000);
@@ -661,6 +659,7 @@
     .energyTotals{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:6px}.energyTotal{padding:6px;background:#26363d;border-radius:4px;display:flex;flex-direction:column;text-align:center}.energyTotal small{font-size:10px;color:#b5c6cc}.energyTotal b{font-size:16px;color:#d5eadb}.energyRow{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,.8fr) minmax(0,.9fr);gap:4px;align-items:center;border-bottom:1px solid #39464d;padding:6px 3px;font-size:11px;font-variant-numeric:tabular-nums}.energyRow>span{text-align:right;overflow-wrap:anywhere}.energyHead{font-size:10px;color:#aebfc6}.energyPerson{min-width:0;overflow-wrap:anywhere}.energyPerson small{display:block;font-size:10px;color:#a8b9bf}.energyTravel{font-size:10px;padding:2px 4px;color:#a8b9bf}
     `;
     style.textContent+='\n.presenceDot{display:inline-block;margin-right:5px}.presenceDot.online{color:#86cf92}.presenceDot.idle{color:#efc269}.presenceDot.offline{color:#a2a8ae}.presenceMember:before{display:none}.presenceMember .member{display:flex;align-items:center;width:100%;gap:4px;text-align:left}.memberPage{margin-left:auto;font-size:11px;color:#a9c2cd;overflow-wrap:anywhere}.watchPage{width:100%;font-size:10px;color:#a9c2cd;overflow-wrap:anywhere}.personalOrder{color:#a6dcff!important}.signal.personalOrder{background:#203b50}.activityDialog{position:fixed;z-index:2147483646;top:15%;left:5%;width:90%;max-height:70vh;overflow:auto;background:#202b31;border:1px solid #6c858f;border-radius:7px;box-shadow:0 8px 32px #0009;padding:8px;color:white}.activityHeading{display:flex;justify-content:space-between;align-items:center}.activityRow{display:flex;flex-direction:column;padding:6px;border-bottom:1px solid #40535c}.activityRow small,.energyFoot{font-size:10px;color:#b5c6cc}.memberEnergy .energyRow{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr)}.connectionNote{padding:5px 8px;margin:0;color:#efcc79;font-size:11px}';
+    style.textContent+='\n.banner{padding:7px 10px}.banner .command{font-size:17px}.banner .issued{font-size:11px;color:inherit}.severity-danger{background:#692d32;color:#ffe0e0;border-color:#e05c60}.severity-warning{background:#66451f;color:#ffe1ad;border-color:#e9a04a}.severity-safe{background:#284c37;color:#e0ffe7;border-color:#68bf83}.severity-neutral{background:#39454d;color:#edf3f6;border-color:#8da2ad}.orderPulse{animation:orderPulse 1.6s ease-in-out infinite}@keyframes orderPulse{50%{box-shadow:inset 0 0 15px #ffffff45}}@media(prefers-reduced-motion:reduce){.orderPulse{animation:none}}';
     panel = document.createElement('details');
     title = document.createElement('summary');
     panel.open=true;
@@ -677,11 +676,12 @@
     target.setAttribute('aria-label','Pile-on target');
     target.hidden = true;
     directive.onchange = () => {target.hidden=directive.value !== 'EVERYONE PILE ON'; fillTargets();};
+    const custom=element('input','');custom.placeholder='Custom order (letters and numbers)';custom.maxLength=100;custom.hidden=true;directive.add(new Option('Custom order','Custom order'));const severity=element('select','');for(const v of ['neutral','danger','warning','safe'])severity.add(new Option(v,v));const pulse=element('input','');pulse.type='checkbox';const pulseLabel=element('label','','Pulse order ');pulseLabel.append(pulse);directive.onchange=()=>{target.hidden=directive.value!=='EVERYONE PILE ON';custom.hidden=directive.value!=='Custom order';severity.value=directive.value==='EVERYONE TURTLE'?'danger':directive.value==='INSIDE HITS ONLY'?'warning':directive.value==='BUILD CHAIN'?'safe':'neutral';pulse.checked=directive.value==='EVERYONE TURTLE';fillTargets();};directive.onchange();
     const send = document.createElement('button');
     send.textContent = 'Send order';
     notice = document.createElement('span');
-    send.onclick=async()=>{send.disabled=true;try{await sendAction('global',directive.value,directive.value==='EVERYONE PILE ON'?target.value:'');}finally{send.disabled=false;}};
-    leaders.append(element('h4','','Global orders'),directive,target,send,notice);
+    send.onclick=async()=>{send.disabled=true;try{await sendAction('global',directive.value,directive.value==='EVERYONE PILE ON'?target.value:'',undefined,{custom:custom.value.trim().replace(/[^\p{L}\p{N} ]/gu,'').replace(/ +/g,' '),severity:severity.value,pulse:pulse.checked});}finally{send.disabled=false;}};
+    leaders.append(element('h4','','Global orders'),directive,target,custom,severity,pulseLabel,send,notice);
     const news = document.createElement('button');
     news.className='news';
     fillTargets();
@@ -717,7 +717,7 @@
     buildOps();
     guard=element('aside','banner','CHAIN BONUS WARNING · Outside target. Return to the faction war and select an enemy.');guard.hidden=true;guard.setAttribute('role','alert');
     roomTabs=element('div','roomTabs');const pages=[['Online',presence],['Energy',opsBox],['Orders',leaders,assignments],['Watch',watchSection]];const bar=element('div','roomNav');const content=element('div','roomContent');let active='Online';function choose(name){active=name;for(const [label,...nodes] of pages){for(const n of nodes)n.hidden=label!==name;const b=bar.querySelector('[data-tab="'+label+'"]');if(b)b.classList.toggle('selected',label===name);}if(name==='Energy')opsBox.open=true;if(name==='Orders')assignments.open=true;if(name==='Watch')watchSection.open=true;render();}for(const [label,...nodes] of pages){const b=element('button','',label);b.dataset.tab=label;b.onclick=()=>choose(label);bar.append(b);for(const n of nodes)content.append(n);}roomTabs.append(bar,content);panel.insertBefore(roomTabs,news);onlineTab.remove();globalTab.remove();output.remove();
-    personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);activityDialog=element('section','activityDialog');activityDialog.hidden=true;root.append(style,owner,panel,activityDialog);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;min-height:0;height:auto;flex:none;box-sizing:border-box;clear:both;overflow:visible';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
+    personalHeader=element('div','personalHeader');personalHeader.hidden=true;const overlay=document.createElement('div');overlay.style.cssText='position:fixed;inset:0;z-index:2147483647;pointer-events:none';const overlayRoot=overlay.attachShadow({mode:'closed'});overlayRoot.append(style.cloneNode(true),personalHeader);document.documentElement.append(overlay);activityDialog=element('section','activityDialog');activityDialog.hidden=true;takeoverDialog=element('section','activityDialog');takeoverDialog.hidden=true;orderHistoryBox=element('section','activityDialog');orderHistoryBox.hidden=true;const historyButton=element('button','','Order history');historyButton.onclick=()=>{const close=element('button','','Close');close.onclick=()=>orderHistoryBox.hidden=true;orderHistoryBox.replaceChildren(element('h4','','Order history'),close,...orderHistory.map(o=>{const r=element('div','activityRow');r.append(element('b','',o.text),element('small','',o.by+' · '+new Date(o.at).toLocaleString()));return r;}));orderHistoryBox.hidden=false;};panel.append(historyButton);root.append(style,owner,panel,activityDialog,takeoverDialog,orderHistoryBox);roomHost=host;flowHost=document.createElement('div');flowHost.id='fw-inline-status';flowHost.style.cssText='display:block;position:static;width:100%;min-width:0;min-height:0;height:auto;flex:none;box-sizing:border-box;clear:both;overflow:visible';flowRoot=flowHost.attachShadow({mode:'closed'});flowRoot.append(style.cloneNode(true),flash,attackAlert,guard,extras);
     if(location.pathname==='/factions.php')layout(host,news);else {news.hidden=true;panel.open=false;mountRoom();}choose('Online');positionFlow();
     let scheduled=false;const observer=new MutationObserver(()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;positionFlow();});});observer.observe(document.body,{childList:true,subtree:true});window.addEventListener('hashchange',()=>{positionFlow();renderOps();});
     window.addEventListener('resize',()=>{headerRect=null;placePersonal(ops.personal);});
