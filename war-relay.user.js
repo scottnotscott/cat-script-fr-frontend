@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.25
+// @version      0.9.26
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -148,7 +148,7 @@
     const heading=element('div','activityHeading');heading.append(element('b','',m?.name||String(activityId)));const close=element('button','','Close');close.onclick=()=>{activityDialog.hidden=true;activityRequest++;};heading.append(close);
     const nav=element('div','roomNav activityNav');for(const tab of ['Overview','Pages','Sent','Received',...activityCategories]){const btn=element('button',tab===activityTab?'selected':'',tab);btn.onclick=()=>{activityTab=tab;renderActivity();};nav.append(btn);}
     const body=element('div','activityBody');
-    if(activityTab==='Overview'){body.append(element('small','','Activity and statistics are shared with authenticated faction members.'));body.append(element('p','','Status: '+(m?.presence||'Unknown')+' · '+(m?.page||'Unknown page')),hpBar('HP',v?.life,v?.maxLife,true,!!v?.at&&Date.now()-v.at>90000));statLines(body,{Energy:v?.energy==null?'Unknown':v.energy+'/'+(v.maxEnergy??'?'),Hits:metricHits(v),'Relay heartbeat':metricAge(m?.seenAt),'Torn activity':metricAge(m?.tornLastAt),'Medical cooldown':metricCooldown(v?.medicalUntil),'Booster cooldown':metricCooldown(v?.boosterUntil)});}
+    if(activityTab==='Overview'){body.append(element('p','','Status: '+(m?.presence||'Unknown')+' · '+(m?.page||'Unknown page')),hpBar('HP',v?.life,v?.maxLife,true,!!v?.at&&Date.now()-v.at>90000));statLines(body,{Energy:v?.energy==null?'Unknown':v.energy+'/'+(v.maxEnergy??'?'),Hits:metricHits(v),'Relay heartbeat':metricAge(m?.seenAt),'Torn activity':metricAge(m?.tornLastAt),'Medical cooldown':metricCooldown(v?.medicalUntil),'Booster cooldown':metricCooldown(v?.boosterUntil)});}
     else if(activityCategories.includes(activityTab)){const d=detailedActivity?.categories?.[activityTab];if(activityLoading)body.append(element('p','','Loading activity…'));else if(!detailedActivity)body.append(element('p','','Activity unavailable. Check backend version or connection.'));else if(!d)body.append(element('p','','Awaiting first collection while member is connected.'));else{body.append(element('small','',d.lifetime?'Lifetime recorded armoury history':'Week from '+new Date(detailedActivity.week).toISOString().slice(0,10)+' TCT'));if(activityTab==='Armoury'&&d.lifetime){const controls=element('div','roomNav activityNav');for(const [kind,label] of [['used','Used'],['donated','Donated'],['other','Other']]){const b=element('button',d.kind===kind?'selected':'',label);b.onclick=()=>{armouryQuery={...armouryQuery,kind,page:1};loadActivity();};controls.append(b);}body.append(controls);const label=element('label','activityPreference','Xanax only'),filter=element('input','');filter.type='checkbox';filter.checked=d.xanax;filter.onchange=()=>{armouryQuery={...armouryQuery,xanax:filter.checked,page:1};loadActivity();};label.append(filter);body.append(label);const t=d.xanaxTotals||{};body.append(element('p','','Xanax used/withdrawn: '+(t.events??0)+' recorded events · '+(t.quantity??0)+' known units'+(t.unknown?' · '+t.unknown+' events with unknown quantity':'')));body.append(element('small','',d.count+' matching records'));}if(d.at)body.append(element('p','','Updated '+metricAge(d.at)));if(d.error)body.append(element('p','',d.error));if(d.since)body.append(element('small','','Baseline: '+new Date(d.since).toISOString().slice(0,16).replace('T',' ')+' TCT'));if(d.delta)statLines(body,d.delta);if(d.totals)statLines(body,d.totals);if(d.partial)body.append(element('small','','Observed API history only; coverage may be incomplete. Damage unavailable.'));if(activityTab==='Gym')body.append(element('small','','Battle stat changes include non-gym gains. Gym energy only when contributor data is available.'));for(const r of d.rows||[]){const line=element('div','activityRow');line.append(element('b','',r.text||r.track||'Race'),element('small','',[r.position!=null?'Position '+r.position:r.status,r.at?new Date(r.at<1e12?r.at*1000:r.at).toISOString().slice(0,16).replace('T',' ')+' TCT':''].filter(Boolean).join(' · ')));body.append(line);}if(!d.rows?.length&&!d.delta&&!d.totals&&!d.error)body.append(element('p','','No records returned'));if(activityTab==='Armoury'&&d.lifetime){const pager=element('div','roomNav');const prev=element('button','','Previous'),next=element('button','','Next');prev.disabled=d.page<=1;next.disabled=d.page>=d.pages;prev.onclick=()=>{armouryQuery={...armouryQuery,page:d.page-1};loadActivity();};next.onclick=()=>{armouryQuery={...armouryQuery,page:d.page+1};loadActivity();};pager.append(prev,element('span','','Page '+d.page+' / '+d.pages),next);body.append(pager);}}}
     else{const rows=activityTab==='Pages'?m?.visits:activityTab==='Sent'?m?.sent:m?.received;for(const r of rows||[]){const line=element('div','activityRow');line.append(element('b','',activityTab==='Pages'?r.page:(activityTab==='Sent'?r.defender:r.attacker)+' · '+outcome(r)),element('small','',new Date(r.at).toLocaleString()));body.append(line);}if(!rows?.length)body.append(element('p','','No recorded activity'));}
     if(activityCategories.includes(activityTab)){const refresh=element('button','','Refresh displayed data');refresh.onclick=()=>loadActivity();body.append(refresh);}
@@ -159,8 +159,8 @@
     if (!title || !flowRoot) return;
     if(connectionNote){connectionNote.textContent=status;connectionNote.hidden=signedIn&&status==='Connected';}
     if(loginForm)loginForm.hidden=signedIn||!!key;
-    titleLabel.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status)+' · v0.9.25';
-    title.title=status+' · v0.9.25';
+    titleLabel.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status)+' · v0.9.26';
+    title.title=status+' · v0.9.26';
     const signature=JSON.stringify(order || null);
     if (signature!==lastOrder) {
       lastOrder=signature;
@@ -752,7 +752,7 @@
       input.pattern = '[a-zA-Z0-9]{16}';
       const submit = document.createElement('button');
       submit.textContent = 'Sign in';
-      form.append(element('p','connectionNote','By connecting, you share Torn activity, combat and gym statistics, racing and lifetime recorded armoury history with authenticated faction members.'));
+      
       form.append(input,submit);
       panel.append(form);
       form.onsubmit = event => {
