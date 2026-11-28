@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.18
+// @version      0.9.19
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -128,8 +128,8 @@
     if (!title || !flowRoot) return;
     if(connectionNote){connectionNote.textContent=status;connectionNote.hidden=signedIn&&status==='Connected';}
     if(loginForm)loginForm.hidden=signedIn||!!key;
-    titleLabel.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status)+' · v0.9.18';
-    title.title=status+' · v0.9.18';
+    titleLabel.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status)+' · v0.9.19';
+    title.title=status+' · v0.9.19';
     const signature=JSON.stringify(order || null);
     if (signature!==lastOrder) {
       lastOrder=signature;
@@ -409,24 +409,9 @@
         }
       }
       if(section && (section.contains(announcement || host) || section===scope || section===document.body)) section=null;
-      // Insert at the section boundary, outside anything the toggle hides.
-      const widget = scope.querySelector('#chain-widget,#faction-chain,[data-widget="chain"],[class*="chain-box"],[class*="chainBox"],[class*="chain-widget"],[class*="chainWidget"]');
-      chainAnchor=chainLabel || widget;
-      if(chainAnchor) {
-        // Climb to the branch immediately after the war summary. Never move
-        // above their common ancestor or into the chain's title/controls.
-        const boundary = warLabel || announcement;
-        if(boundary && !chainAnchor.contains(boundary)) {
-          while(chainAnchor.parentElement && chainAnchor.parentElement!==scope && !chainAnchor.parentElement.contains(boundary))
-            chainAnchor=chainAnchor.parentElement;
-        } else {
-          chainAnchor=widget || chainAnchor.closest('section,.sortable-box,[class*="chain-wrap"],[class*="chainWrap"]') || chainAnchor.parentElement;
-        }
-      }
-      anchor=chainAnchor || section || announcement?.closest('.sortable-box,section,[class*="announcement-wrap"]') || scope.querySelector('#faction_war_list_id,.f-war-list');
-      if(anchor && anchor!==host && !host.contains(anchor)) {
-        if(host.nextElementSibling!==anchor) anchor.before(host);
-      } else if(!host.isConnected) scope.prepend(host);
+      // The faction React app owns its internal layout, including positioned
+      // ranked-war widgets. Never insert a sibling inside that app.
+      mountRoom();
       section?.classList.toggle(hideClass,hidden);
       button.textContent=section ? (hidden?'Show main news':'Hide main news') : 'Main news unavailable';
       button.disabled=!section;
@@ -434,7 +419,7 @@
     button.onclick=()=>{hidden=!hidden;try{localStorage.setItem('fw.hideNews',hidden?'1':'0');}catch{}locate();};
     locate();
     new MutationObserver(()=>{
-      if(host.isConnected && section?.isConnected && chainAnchor?.isConnected && host.nextElementSibling===anchor) return;
+      if(host.parentElement===safeContent() && section?.isConnected) return;
       if(!timer) timer=setTimeout(()=>{timer=null;locate();},700);
     }).observe(document.body,{childList:true,subtree:true});
   }
@@ -533,7 +518,16 @@
   let flowHost, roomHost, newsControl, watcherNode, flowRoot;
   function safeContent(){return document.querySelector('#mainContainer > .content-wrapper[role="main"]')||document.querySelector('.content-wrapper[role="main"]')||document.querySelector('#mainContainer > .content-wrapper')||document.querySelector('main[role="main"],main');}
   function desktopLayout(){return !!document.querySelector('#mainContainer > #sidebarroot')&&innerWidth>=760;}
-  function mountRoom(){const main=safeContent();if(!main||!roomHost)return false;if(!roomHost.isConnected||(!isWarView()&&!main.contains(roomHost))){const heading=main.querySelector(':scope > .content-title');if(heading)heading.after(roomHost);else main.prepend(roomHost);}return true;}
+  function mountRoom(){const main=safeContent();if(!main||!roomHost)return false;
+    if(location.pathname==='/factions.php'){
+      // Keep both injected hosts outside the native faction application's
+      // positioned descendants, in the same normal-flow content column.
+      const firstNative=[...main.children].find(n=>n!==roomHost&&n!==flowHost);
+      if(roomHost.parentElement!==main||(firstNative&&roomHost.nextElementSibling!==firstNative)){
+        if(firstNative)main.insertBefore(roomHost,firstNative);else main.append(roomHost);
+      }
+    }else if(roomHost.parentElement!==main){const heading=main.querySelector(':scope > .content-title');if(heading)heading.after(roomHost);else main.prepend(roomHost);}
+    return true;}
   function positionFlow(){
     if(!flowHost||!roomHost)return;
     const war=isWarView(), showRoom=roomView();
@@ -545,6 +539,7 @@
     const hasContent=[flash,attackAlert,guard,watcherNode].some(n=>n&&!n.hidden)||!!extras?.children.length;
     if(!hasContent){flowHost.hidden=true;flowHost.style.setProperty('display','none','important');return;}
     const main=safeContent();
+    if(location.pathname==='/factions.php'&&main&&roomHost.parentElement===main){if(flowHost.parentElement!==main||flowHost.nextElementSibling!==roomHost)main.insertBefore(flowHost,roomHost);flowHost.hidden=false;flowHost.style.setProperty('display','block','important');return;}
     if(desktopLayout()){if(main){if(main.firstElementChild!==flowHost)main.prepend(flowHost);flowHost.hidden=false;flowHost.style.setProperty('display','block','important');}else{flowHost.hidden=true;flowHost.style.setProperty('display','none','important');}return;}
     const row=visibleIconRow();
     let anchor=row;
@@ -640,7 +635,7 @@
   }
   function mount() {
     const host = document.createElement('div');
-    host.style.cssText='display:block;position:relative;width:100%;min-width:0;box-sizing:border-box;margin:8px 0;clear:both';
+    host.style.cssText='display:block;position:relative;width:100%;max-width:100%;min-width:0;flex:0 0 auto;box-sizing:border-box;margin:8px 0;clear:both';
     const root = host.attachShadow({mode:'closed'});
     const style = document.createElement('style');
     style.textContent = `
