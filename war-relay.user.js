@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.20
+// @version      0.9.21
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -33,11 +33,14 @@
   const dismissedFights=new Map();
 
   const endpoint = path => RELAY_BASE+path;
+  const activityHints=new Set();let hintTimer;
+  function hintActivity(url,method){try{const u=new URL(String(url),location.href);if(u.origin!==location.origin)return;const path=(u.pathname+' '+u.search+' '+location.pathname+' '+location.search).toLowerCase();if(String(method).toUpperCase()!=='POST')return;for(const [category,pattern] of [['Gym',/gym/],['Racing',/racing|race/],['Bookies',/bookie|sportsbook/],['Armoury',/armou?ry|item\.php|itemuse/],['Attacks',/attack/]])if(pattern.test(path))activityHints.add(category);if(activityHints.size&&!hintTimer)hintTimer=setTimeout(()=>{hintTimer=null;void refreshIntel();},2500);}catch{}}
   async function refreshIntel(){
     if(Date.now()<nextIntel || (!sessionToken && !authenticated))return;
+    const hints=[...activityHints];activityHints.clear();
     nextIntel=Date.now()+30000;
-    if(authenticated){socket.send(JSON.stringify({type:'intel',key}));return;}
-    try { await postNative(endpoint('/intel'),'Bearer '+sessionToken,{}, {'X-Torn-Key':key}); } catch {}
+    if(authenticated){socket.send(JSON.stringify({type:'intel',key,hints}));return;}
+    try { await postNative(endpoint('/intel'),'Bearer '+sessionToken,{}, {'X-Torn-Key':key,'X-Activity-Hints':hints.join(',')}); } catch {}
   }
   let titleLabel;
   let orderHistory=[],primaryDuration,secondaryDuration,orderHistoryBox,inlineOrder,takeoverDialog;
@@ -148,6 +151,7 @@
     else if(activityTab==='Overview'){body.append(element('p','','Status: '+(m?.presence||'Unknown')+' · '+(m?.page||'Unknown page')),hpBar('HP',v?.life,v?.maxLife,true,!!v?.at&&Date.now()-v.at>90000));statLines(body,{Energy:v?.energy==null?'Unknown':v.energy+'/'+(v.maxEnergy??'?'),Hits:metricHits(v),'Relay heartbeat':metricAge(m?.seenAt),'Torn activity':metricAge(m?.tornLastAt),'Medical cooldown':metricCooldown(v?.medicalUntil),'Booster cooldown':metricCooldown(v?.boosterUntil)});}
     else if(activityCategories.includes(activityTab)){const d=detailedActivity?.categories?.[activityTab];if(activityLoading)body.append(element('p','','Loading activity…'));else if(!detailedActivity)body.append(element('p','','Activity unavailable. Check backend version or connection.'));else if(!detailedActivity.preferences?.[activityTab])body.append(element('p','','This member has not enabled sharing for this category.'));else if(!d)body.append(element('p','','Awaiting first collection while member is connected.'));else{body.append(element('small','','Week from '+new Date(detailedActivity.week).toISOString().slice(0,10)+' TCT'));if(d.at)body.append(element('p','','Updated '+metricAge(d.at)));if(d.error)body.append(element('p','',d.error));if(d.since)body.append(element('small','','Baseline: '+new Date(d.since).toISOString().slice(0,16).replace('T',' ')+' TCT'));if(d.delta)statLines(body,d.delta);if(d.totals)statLines(body,d.totals);if(d.partial)body.append(element('small','','Observed API history only; coverage may be incomplete. Damage unavailable.'));if(activityTab==='Gym')body.append(element('small','','Battle stat changes include non-gym gains. Gym energy only when contributor data is available.'));if(activityTab==='Bookies')body.append(element('small','','Bookies-specific counters only; individual bets not available here.'));for(const r of d.rows||[]){const line=element('div','activityRow');line.append(element('b','',r.text||r.track||'Race'),element('small','',[r.position!=null?'Position '+r.position:r.status,r.at?new Date(r.at<1e12?r.at*1000:r.at).toISOString().slice(0,16).replace('T',' ')+' TCT':''].filter(Boolean).join(' · ')));body.append(line);}if(!d.rows?.length&&!d.delta&&!d.totals&&!d.error)body.append(element('p','','No records returned'));}}
     else{const rows=activityTab==='Pages'?m?.visits:activityTab==='Sent'?m?.sent:m?.received;for(const r of rows||[]){const line=element('div','activityRow');line.append(element('b','',activityTab==='Pages'?r.page:(activityTab==='Sent'?r.defender:r.attacker)+' · '+outcome(r)),element('small','',new Date(r.at).toLocaleString()));body.append(line);}if(!rows?.length)body.append(element('p','','No recorded activity'));}
+    if(activityCategories.includes(activityTab)){const refresh=element('button','','Refresh displayed data');refresh.onclick=()=>loadActivity();body.append(refresh);}
     activityDialog.replaceChildren(heading,nav,body);
   }
 
@@ -155,8 +159,8 @@
     if (!title || !flowRoot) return;
     if(connectionNote){connectionNote.textContent=status;connectionNote.hidden=signedIn&&status==='Connected';}
     if(loginForm)loginForm.hidden=signedIn||!!key;
-    titleLabel.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status)+' · v0.9.20';
-    title.title=status+' · v0.9.20';
+    titleLabel.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status)+' · v0.9.21';
+    title.title=status+' · v0.9.21';
     const signature=JSON.stringify(order || null);
     if (signature!==lastOrder) {
       lastOrder=signature;
@@ -374,6 +378,7 @@
   const observedFetch = async function(...args) {
     const sampleAt=Date.now();
     const res = await original.apply(this,args);
+    if(res.ok)hintActivity(res.url,args[1]?.method||args[0]?.method||'GET');
     if (relevant(res.url)) { try { res.clone().json().then(data=>observe(data,sampleAt)).catch(() => {}); } catch {} }
     return res;
   };
@@ -381,6 +386,7 @@
   const open = pageWindow.XMLHttpRequest.prototype.open;
   const observedOpen = function(method,url,...rest) {
     const sampleAt=Date.now();
+    this.addEventListener('load',function(){if(this.status>=200&&this.status<300)hintActivity(this.responseURL||url,method);},{once:true});
     if (relevant(url)) this.addEventListener('load',function() {
       try { if (relevant(this.responseURL)) observe(this.responseType === 'json' ? this.response : JSON.parse(this.responseText),sampleAt); } catch {}
     },{once:true});
