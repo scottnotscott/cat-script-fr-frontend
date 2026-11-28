@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Feudal World War Relay
 // @namespace    scottnotscott.feudalworld
-// @version      0.9.22
+// @version      0.9.23
 // @match        https://www.torn.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
@@ -127,18 +127,19 @@
   function isWarView(){const q=new URLSearchParams(location.search);const h=location.hash;return location.pathname==='/factions.php'&&q.get('step')!=='rankreport'&&q.get('step')!=='profile'&&(!q.get('type')||q.get('type')==='1')&&!h.includes('tab=')&&!/^#\/war\/\d+$/.test(h)&&(!h||h==='#/'||h.startsWith('#/war'));}
   function roomView(){return true;}
   function presenceDot(state){const d=element('span','presenceDot '+(state||'offline'),'●');d.title=state||'offline';d.setAttribute('aria-label',state||'offline');return d;}
+  let armouryQuery={kind:'used',xanax:false,page:1};
   async function loadActivity(preferences){
     const id=activityId,request=++activityRequest;activityLoading=true;activitySignature='';renderActivity();
     try{
-      if(authenticated&&socket?.readyState===1){socket.send(JSON.stringify({type:'activity',id,preferences}));return;}
+      if(authenticated&&socket?.readyState===1){socket.send(JSON.stringify({type:'activity',id,preferences,armoury:armouryQuery}));return;}
       if(!sessionToken)throw Error('Not connected');
-      const r=await postNative(endpoint('/activity'),'Bearer '+sessionToken,{id,preferences});
+      const r=await postNative(endpoint('/activity'),'Bearer '+sessionToken,{id,preferences,armoury:armouryQuery});
       if(Number(r.status)!==200)throw Error('Activity request failed');
       const d=JSON.parse(r.responseText);if(request!==activityRequest)return;detailedActivity=d.activity;ownActivityPreferences=d.ownPreferences||{};activityLoading=false;
     }catch{if(request!==activityRequest)return;detailedActivity=null;activityLoading=false;}
     activitySignature='';renderActivity();
   }
-  function openActivity(id,name){activityId=id??name;activityTab='Overview';activitySignature='';detailedActivity=null;activityDialog.hidden=false;void loadActivity();}
+  function openActivity(id,name){activityId=id??name;armouryQuery={kind:'used',xanax:false,page:1};activityTab='Overview';activitySignature='';detailedActivity=null;activityDialog.hidden=false;void loadActivity();}
   function statLines(body,values){for(const [k,v] of Object.entries(values||{})){const row=element('div','activityRow');row.append(element('b','',k.replace(/_/g,' ')),element('span','',typeof v==='number'?v.toLocaleString('en-GB',{maximumFractionDigits:2}):String(v)));body.append(row);}}
   function renderActivity(){
     if(!activityDialog||activityDialog.hidden)return;
@@ -149,7 +150,7 @@
     const body=element('div','activityBody');
     if(activityTab==='Sharing'){body.append(element('p','','Choose which additional statistics you share with faction members. Off by default. Disabling a category removes its stored history.'));const fields={};for(const c of activityCategories){const label=element('label','activityPreference',c+' '),input=element('input','');input.type='checkbox';input.checked=ownActivityPreferences[c]===true;fields[c]=input;label.append(input);body.append(label);}const save=element('button','','Save my sharing preferences');save.onclick=()=>loadActivity(Object.fromEntries(Object.entries(fields).map(([k,n])=>[k,n.checked])));body.append(save);}
     else if(activityTab==='Overview'){body.append(element('p','','Status: '+(m?.presence||'Unknown')+' · '+(m?.page||'Unknown page')),hpBar('HP',v?.life,v?.maxLife,true,!!v?.at&&Date.now()-v.at>90000));statLines(body,{Energy:v?.energy==null?'Unknown':v.energy+'/'+(v.maxEnergy??'?'),Hits:metricHits(v),'Relay heartbeat':metricAge(m?.seenAt),'Torn activity':metricAge(m?.tornLastAt),'Medical cooldown':metricCooldown(v?.medicalUntil),'Booster cooldown':metricCooldown(v?.boosterUntil)});}
-    else if(activityCategories.includes(activityTab)){const d=detailedActivity?.categories?.[activityTab];if(activityLoading)body.append(element('p','','Loading activity…'));else if(!detailedActivity)body.append(element('p','','Activity unavailable. Check backend version or connection.'));else if(!detailedActivity.preferences?.[activityTab])body.append(element('p','','This member has not enabled sharing for this category.'));else if(!d)body.append(element('p','','Awaiting first collection while member is connected.'));else{body.append(element('small','','Week from '+new Date(detailedActivity.week).toISOString().slice(0,10)+' TCT'));if(d.at)body.append(element('p','','Updated '+metricAge(d.at)));if(d.error)body.append(element('p','',d.error));if(d.since)body.append(element('small','','Baseline: '+new Date(d.since).toISOString().slice(0,16).replace('T',' ')+' TCT'));if(d.delta)statLines(body,d.delta);if(d.totals)statLines(body,d.totals);if(d.partial)body.append(element('small','','Observed API history only; coverage may be incomplete. Damage unavailable.'));if(activityTab==='Gym')body.append(element('small','','Battle stat changes include non-gym gains. Gym energy only when contributor data is available.'));if(activityTab==='Bookies')body.append(element('small','','Bookies-specific counters only; individual bets not available here.'));for(const r of d.rows||[]){const line=element('div','activityRow');line.append(element('b','',r.text||r.track||'Race'),element('small','',[r.position!=null?'Position '+r.position:r.status,r.at?new Date(r.at<1e12?r.at*1000:r.at).toISOString().slice(0,16).replace('T',' ')+' TCT':''].filter(Boolean).join(' · ')));body.append(line);}if(!d.rows?.length&&!d.delta&&!d.totals&&!d.error)body.append(element('p','','No records returned'));}}
+    else if(activityCategories.includes(activityTab)){const d=detailedActivity?.categories?.[activityTab];if(activityLoading)body.append(element('p','','Loading activity…'));else if(!detailedActivity)body.append(element('p','','Activity unavailable. Check backend version or connection.'));else if(!detailedActivity.preferences?.[activityTab])body.append(element('p','','This member has not enabled sharing for this category.'));else if(!d)body.append(element('p','','Awaiting first collection while member is connected.'));else{body.append(element('small','',d.lifetime?'Lifetime recorded armoury history':'Week from '+new Date(detailedActivity.week).toISOString().slice(0,10)+' TCT'));if(activityTab==='Armoury'&&d.lifetime){const controls=element('div','roomNav activityNav');for(const [kind,label] of [['used','Used'],['donated','Donated'],['other','Other']]){const b=element('button',d.kind===kind?'selected':'',label);b.onclick=()=>{armouryQuery={...armouryQuery,kind,page:1};loadActivity();};controls.append(b);}body.append(controls);const label=element('label','activityPreference','Xanax only'),filter=element('input','');filter.type='checkbox';filter.checked=d.xanax;filter.onchange=()=>{armouryQuery={...armouryQuery,xanax:filter.checked,page:1};loadActivity();};label.append(filter);body.append(label);const t=d.xanaxTotals||{};body.append(element('p','','Xanax used/withdrawn: '+(t.events??0)+' recorded events · '+(t.quantity??0)+' known units'+(t.unknown?' · '+t.unknown+' events with unknown quantity':'')));body.append(element('small','',d.count+' matching records'));}if(d.at)body.append(element('p','','Updated '+metricAge(d.at)));if(d.error)body.append(element('p','',d.error));if(d.since)body.append(element('small','','Baseline: '+new Date(d.since).toISOString().slice(0,16).replace('T',' ')+' TCT'));if(d.delta)statLines(body,d.delta);if(d.totals)statLines(body,d.totals);if(d.partial)body.append(element('small','','Observed API history only; coverage may be incomplete. Damage unavailable.'));if(activityTab==='Gym')body.append(element('small','','Battle stat changes include non-gym gains. Gym energy only when contributor data is available.'));if(activityTab==='Bookies')body.append(element('small','','Bookies-specific counters only; individual bets not available here.'));for(const r of d.rows||[]){const line=element('div','activityRow');line.append(element('b','',r.text||r.track||'Race'),element('small','',[r.position!=null?'Position '+r.position:r.status,r.at?new Date(r.at<1e12?r.at*1000:r.at).toISOString().slice(0,16).replace('T',' ')+' TCT':''].filter(Boolean).join(' · ')));body.append(line);}if(!d.rows?.length&&!d.delta&&!d.totals&&!d.error)body.append(element('p','','No records returned'));if(activityTab==='Armoury'&&d.lifetime){const pager=element('div','roomNav');const prev=element('button','','Previous'),next=element('button','','Next');prev.disabled=d.page<=1;next.disabled=d.page>=d.pages;prev.onclick=()=>{armouryQuery={...armouryQuery,page:d.page-1};loadActivity();};next.onclick=()=>{armouryQuery={...armouryQuery,page:d.page+1};loadActivity();};pager.append(prev,element('span','','Page '+d.page+' / '+d.pages),next);body.append(pager);}}}
     else{const rows=activityTab==='Pages'?m?.visits:activityTab==='Sent'?m?.sent:m?.received;for(const r of rows||[]){const line=element('div','activityRow');line.append(element('b','',activityTab==='Pages'?r.page:(activityTab==='Sent'?r.defender:r.attacker)+' · '+outcome(r)),element('small','',new Date(r.at).toLocaleString()));body.append(line);}if(!rows?.length)body.append(element('p','','No recorded activity'));}
     if(activityCategories.includes(activityTab)){const refresh=element('button','','Refresh displayed data');refresh.onclick=()=>loadActivity();body.append(refresh);}
     activityDialog.replaceChildren(heading,nav,body);
@@ -159,8 +160,8 @@
     if (!title || !flowRoot) return;
     if(connectionNote){connectionNote.textContent=status;connectionNote.hidden=signedIn&&status==='Connected';}
     if(loginForm)loginForm.hidden=signedIn||!!key;
-    titleLabel.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status)+' · v0.9.22';
-    title.title=status+' · v0.9.22';
+    titleLabel.textContent = 'War room · '+(me ? me.name+' · '+me.role+' · '+status : status)+' · v0.9.23';
+    title.title=status+' · v0.9.23';
     const signature=JSON.stringify(order || null);
     if (signature!==lastOrder) {
       lastOrder=signature;
